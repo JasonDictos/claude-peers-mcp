@@ -32,6 +32,7 @@ bun cli.ts status
 bun cli.ts peers
 bun cli.ts send <name|id|path> <message>
 bun cli.ts whoami
+bun cli.ts iam <name>   # rename this session's peer
 bun cli.ts statusline   # for statusLine in ~/.claude/settings.json
 bun cli.ts kill-broker
 ```

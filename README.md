@@ -77,6 +77,14 @@ Paths match a peer's working directory or its git repo (so `~/een-ports` finds a
 
 Every session gets a human-readable name at registration — `goofy-joe`, `eager-eddy` — unique among live peers. Names and IDs are interchangeable anywhere a target is accepted.
 
+Don't like the generated name? Rename the session from inside it:
+
+```bash
+bun ~/claude-peers-mcp/cli.ts iam archiver-guy
+```
+
+Names are normalized (lowercase, spaces become dashes) and must be unique among live peers — a collision tells you who already has the name.
+
 You can show the name in your Claude Code status bar by pointing `statusLine` in `~/.claude/settings.json` at the bundled command:
 
 ```json
@@ -120,9 +128,56 @@ bun cli.ts status                # broker status + all peers
 bun cli.ts peers                 # list peers
 bun cli.ts send <target> <msg>   # send a message (target: name, ID, or ~/path)
 bun cli.ts whoami                # this session's peer name and ID
+bun cli.ts iam <name>            # rename this session's peer
 bun cli.ts statusline            # statusline command (Claude Code JSON on stdin)
 bun cli.ts kill-broker           # stop the broker
 ```
+
+## Handy slash commands
+
+Drop these in `~/.claude/commands/` to inspect the peer network from any session. Each runs the CLI and reports the result (replace the path with wherever you cloned the repo):
+
+```markdown
+<!-- ~/.claude/commands/peer-whoami.md -->
+---
+description: Show this session's claude-peers identity (name, ID, cwd)
+allowed-tools: Bash(bun ~/claude-peers-mcp/cli.ts:*)
+---
+Peer identity of this session:
+
+!`bun ~/claude-peers-mcp/cli.ts whoami`
+
+Report the identity above to the user in one line.
+```
+
+```markdown
+<!-- ~/.claude/commands/peer-list.md -->
+---
+description: List all Claude Code peers on this machine (claude-peers)
+allowed-tools: Bash(bun ~/claude-peers-mcp/cli.ts:*)
+---
+Current peers on the claude-peers network:
+
+!`bun ~/claude-peers-mcp/cli.ts peers`
+
+Present the peers above as a compact table: name, ID, directory, summary.
+```
+
+```markdown
+<!-- ~/.claude/commands/peer-iam.md -->
+---
+description: Rename this session's claude-peers name
+argument-hint: <name>
+allowed-tools: Bash(bun ~/claude-peers-mcp/cli.ts:*)
+---
+Rename result:
+
+!`bun ~/claude-peers-mcp/cli.ts iam $ARGUMENTS`
+
+Confirm the rename to the user in one line (old name -> new name).
+```
+
+Then `/peer-whoami`, `/peer-list`, and `/peer-iam <name>` work in every session.
 
 ## Configuration
 
