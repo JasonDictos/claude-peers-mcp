@@ -64,6 +64,16 @@ db.run(`
   )
 `);
 
+// Sticky names: remembers which name belongs to which directory so a
+// relaunched session gets its old name back
+db.run(`
+  CREATE TABLE IF NOT EXISTS name_bindings (
+    cwd TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )
+`);
+
 db.run(`
   CREATE TABLE IF NOT EXISTS messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,6 +131,25 @@ function takenNames(): Set<string> {
   return new Set(rows.map((r) => r.name));
 }
 
+function bindName(cwd: string, name: string) {
+  db.run(
+    `INSERT INTO name_bindings (cwd, name, updated_at) VALUES (?, ?, ?)
+     ON CONFLICT(cwd) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
+    [cwd, name, new Date().toISOString()]
+  );
+}
+
+/** True if no other live peer of the same claude_pid registered earlier. */
+function isPrimary(peer: Peer, live: Peer[]): boolean {
+  if (peer.claude_pid == null) return true;
+  return !live.some(
+    (p) =>
+      p.id !== peer.id &&
+      p.claude_pid === peer.claude_pid &&
+      p.registered_at < peer.registered_at
+  );
+}
+
 nameUnnamedPeers();
 
 // Rename agent peers (same claude_pid as an earlier registration) to the
@@ -155,6 +184,30 @@ function normalizeAgentNames() {
 }
 
 normalizeAgentNames();
+
+// Seed bindings for live primaries whose directory has none yet, so names
+// that predate stickiness become sticky from here on (existing bindings win)
+function seedNameBindings() {
+  const alive = (db.query("SELECT * FROM peers WHERE name != ''").all() as Peer[]).filter((p) => {
+    try {
+      process.kill(p.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const primaries = alive
+    .filter((p) => isPrimary(p, alive))
+    .sort((a, b) => a.registered_at.localeCompare(b.registered_at));
+  for (const p of primaries) {
+    db.run(
+      "INSERT OR IGNORE INTO name_bindings (cwd, name, updated_at) VALUES (?, ?, ?)",
+      [p.cwd, p.name, new Date().toISOString()]
+    );
+  }
+}
+
+seedNameBindings();
 
 // --- Prepared statements ---
 
@@ -215,17 +268,30 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     deletePeer.run(existing.id);
   }
 
+  const live = livePeers();
+  const taken = new Set(live.map((p) => p.name));
+
   // Extra registrations from the same Claude process are subagent MCP
   // connections — name them as suffixed children of the session's primary
   let name: string;
   const siblings = body.claude_pid != null
-    ? livePeers().filter((p) => p.claude_pid === body.claude_pid)
+    ? live.filter((p) => p.claude_pid === body.claude_pid)
     : [];
   if (siblings.length > 0) {
     const primary = siblings.reduce((a, b) => (a.registered_at <= b.registered_at ? a : b));
-    name = childName(primary.name, takenNames());
+    name = childName(primary.name, taken);
   } else {
-    name = generateName(takenNames());
+    // Sticky names: a relaunched session in a known directory gets its old
+    // name back, unless another live peer holds it (second session there)
+    const bound = db
+      .query("SELECT name FROM name_bindings WHERE cwd = ?")
+      .get(body.cwd) as { name: string } | null;
+    if (bound && !taken.has(bound.name)) {
+      name = bound.name;
+    } else {
+      name = generateName(taken);
+      if (!bound) bindName(body.cwd, name);
+    }
   }
   insertPeer.run(
     id,
@@ -269,6 +335,11 @@ function handleSetName(body: { id: string; name: string }): {
     return { ok: false, error: `Name "${name}" is already taken by peer ${clash.id} in ${clash.cwd}` };
   }
   db.run("UPDATE peers SET name = ? WHERE id = ?", [name, body.id]);
+
+  // Sticky names: a renamed primary keeps its name across relaunches
+  if (isPrimary(peer, livePeers())) {
+    bindName(peer.cwd, name);
+  }
 
   // Renaming a session's primary carries its agent peers along:
   // old-name-N -> new-name-N

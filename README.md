@@ -85,6 +85,8 @@ bun ~/claude-peers-mcp/cli.ts iam archiver-guy
 
 Names are normalized (lowercase, spaces become dashes) and must be unique among live peers — a collision tells you who already has the name.
 
+Names are **sticky per directory**: the broker remembers which name belongs to which working directory, so relaunching a session in `~/een-ports` brings back its old name (generated or custom) instead of rolling a new one. If a second session starts in the same directory while the first is running, it gets a fresh name and the binding stays with the original.
+
 ### Sessions with subagents
 
 A session running subagents opens extra MCP connections, each registering as its own peer. These are detected (they share the session's process) and named as suffixed children: the top-level session is `goofy-joe`, its agents `goofy-joe-1`, `goofy-joe-2`, ... Path addressing always resolves to the top-level session — agents are only reachable by their explicit suffixed name. Renaming the session (`iam`) renames its agents with it.
