@@ -1,5 +1,16 @@
 import { test, expect, describe } from "bun:test";
-import { generateName, ADJECTIVES, NOUNS } from "./names.ts";
+import { generateName, childName, ADJECTIVES, NOUNS } from "./names.ts";
+
+describe("childName", () => {
+  test("first agent gets -1", () => {
+    expect(childName("goofy-joe", new Set(["goofy-joe"]))).toBe("goofy-joe-1");
+  });
+
+  test("skips taken suffixes", () => {
+    const taken = new Set(["goofy-joe", "goofy-joe-1", "goofy-joe-2"]);
+    expect(childName("goofy-joe", taken)).toBe("goofy-joe-3");
+  });
+});
 
 describe("generateName", () => {
   test("produces adjective-noun format", () => {

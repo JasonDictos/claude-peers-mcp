@@ -23,6 +23,14 @@ function pick<T>(arr: readonly T[]): T {
   return arr[Math.floor(Math.random() * arr.length)]!;
 }
 
+/** Name for an agent peer of an existing session: base-1, base-2, ... */
+export function childName(base: string, taken: Set<string>): string {
+  for (let n = 1; ; n++) {
+    const name = `${base}-${n}`;
+    if (!taken.has(name)) return name;
+  }
+}
+
 export function generateName(taken: Set<string>): string {
   for (let i = 0; i < MAX_RANDOM_ATTEMPTS; i++) {
     const name = `${pick(ADJECTIVES)}-${pick(NOUNS)}`;

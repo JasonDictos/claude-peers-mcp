@@ -23,7 +23,7 @@ import type {
   Peer,
   Message,
 } from "./shared/types.ts";
-import { generateName } from "./shared/names.ts";
+import { generateName, childName } from "./shared/names.ts";
 import { resolveTarget } from "./shared/resolve.ts";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
@@ -123,6 +123,39 @@ function takenNames(): Set<string> {
 
 nameUnnamedPeers();
 
+// Rename agent peers (same claude_pid as an earlier registration) to the
+// suffix scheme — fixes groups that registered before this behavior existed
+function normalizeAgentNames() {
+  const all = db.query("SELECT * FROM peers WHERE claude_pid IS NOT NULL").all() as Peer[];
+  const alive = all.filter((p) => {
+    try {
+      process.kill(p.pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  const groups = new Map<number, Peer[]>();
+  for (const p of alive) {
+    const group = groups.get(p.claude_pid!) ?? [];
+    group.push(p);
+    groups.set(p.claude_pid!, group);
+  }
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    group.sort((a, b) => a.registered_at.localeCompare(b.registered_at));
+    const primary = group[0]!;
+    const childPattern = new RegExp(`^${primary.name}-\\d+$`);
+    for (const agent of group.slice(1)) {
+      if (childPattern.test(agent.name)) continue;
+      const name = childName(primary.name, takenNames());
+      db.run("UPDATE peers SET name = ? WHERE id = ?", [name, agent.id]);
+    }
+  }
+}
+
+normalizeAgentNames();
+
 // --- Prepared statements ---
 
 const insertPeer = db.prepare(`
@@ -182,7 +215,18 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     deletePeer.run(existing.id);
   }
 
-  const name = generateName(takenNames());
+  // Extra registrations from the same Claude process are subagent MCP
+  // connections — name them as suffixed children of the session's primary
+  let name: string;
+  const siblings = body.claude_pid != null
+    ? livePeers().filter((p) => p.claude_pid === body.claude_pid)
+    : [];
+  if (siblings.length > 0) {
+    const primary = siblings.reduce((a, b) => (a.registered_at <= b.registered_at ? a : b));
+    name = childName(primary.name, takenNames());
+  } else {
+    name = generateName(takenNames());
+  }
   insertPeer.run(
     id,
     name,
@@ -216,7 +260,7 @@ function handleSetName(body: { id: string; name: string }): {
   if (!name || name.length > 64) {
     return { ok: false, error: "Name must be 1-64 characters" };
   }
-  const peer = db.query("SELECT id FROM peers WHERE id = ?").get(body.id) as { id: string } | null;
+  const peer = db.query("SELECT * FROM peers WHERE id = ?").get(body.id) as Peer | null;
   if (!peer) {
     return { ok: false, error: `Peer ${body.id} not found` };
   }
@@ -225,6 +269,22 @@ function handleSetName(body: { id: string; name: string }): {
     return { ok: false, error: `Name "${name}" is already taken by peer ${clash.id} in ${clash.cwd}` };
   }
   db.run("UPDATE peers SET name = ? WHERE id = ?", [name, body.id]);
+
+  // Renaming a session's primary carries its agent peers along:
+  // old-name-N -> new-name-N
+  if (peer.claude_pid != null) {
+    const childPattern = new RegExp(`^${peer.name}-(\\d+)$`);
+    const agents = livePeers().filter(
+      (p) => p.id !== body.id && p.claude_pid === peer.claude_pid && childPattern.test(p.name)
+    );
+    const taken = takenNames();
+    for (const agent of agents) {
+      const suffixed = `${name}-${agent.name.match(childPattern)![1]}`;
+      const agentName = taken.has(suffixed) ? childName(name, taken) : suffixed;
+      db.run("UPDATE peers SET name = ? WHERE id = ?", [agentName, agent.id]);
+      taken.add(agentName);
+    }
+  }
   return { ok: true, name };
 }
 

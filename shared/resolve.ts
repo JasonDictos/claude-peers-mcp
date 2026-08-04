@@ -29,6 +29,30 @@ function looksLikePath(target: string): boolean {
   return target.startsWith("~") || target.includes("/") || target === ".";
 }
 
+/**
+ * A session running subagents registers several peers sharing one claude_pid.
+ * Collapse each such group to its primary (earliest registered) so a path
+ * targets the top-level session, not its agents. Peers without a claude_pid
+ * stay standalone.
+ */
+function collapseAgentGroups(matches: Peer[]): Peer[] {
+  const standalone: Peer[] = [];
+  const groups = new Map<number, Peer[]>();
+  for (const p of matches) {
+    if (p.claude_pid == null) {
+      standalone.push(p);
+    } else {
+      const group = groups.get(p.claude_pid) ?? [];
+      group.push(p);
+      groups.set(p.claude_pid, group);
+    }
+  }
+  const primaries = [...groups.values()].map((group) =>
+    group.reduce((a, b) => (a.registered_at <= b.registered_at ? a : b))
+  );
+  return [...standalone, ...primaries];
+}
+
 export function resolveTarget(peers: Peer[], target: string, home: string): Resolution {
   // 1. Exact ID
   const byId = peers.find((p) => p.id === target);
@@ -52,7 +76,7 @@ export function resolveTarget(peers: Peer[], target: string, home: string): Reso
           (isSameOrInside(p.git_root, path) || isSameOrInside(path, p.git_root)))
     );
 
-    const matches = exact.length > 0 ? exact : contained;
+    const matches = collapseAgentGroups(exact.length > 0 ? exact : contained);
     if (matches.length === 1) return { kind: "match", peer: matches[0]! };
     if (matches.length > 1) return { kind: "ambiguous", candidates: matches };
   }
