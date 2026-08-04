@@ -33,7 +33,7 @@ import {
   getRecentFiles,
 } from "./shared/summarize.ts";
 import { brokerFetch } from "./shared/client.ts";
-import { claudeKey, getRuntimeId } from "./shared/runtime.ts";
+import { claudeKey, getRuntimeId, getParentPid } from "./shared/runtime.ts";
 
 // --- Configuration ---
 
@@ -625,9 +625,14 @@ async function main() {
   }, HEARTBEAT_INTERVAL_MS);
 
   // 8. Clean up on exit
+  let orphanTimer: ReturnType<typeof setInterval> | undefined;
+  let cleaningUp = false;
   const cleanup = async () => {
+    if (cleaningUp) return;
+    cleaningUp = true;
     clearInterval(pollTimer);
     clearInterval(heartbeatTimer);
+    clearInterval(orphanTimer);
     if (myId) {
       try {
         await brokerFetch("/unregister", { id: myId });
@@ -641,6 +646,23 @@ async function main() {
 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+
+  // Exit with our Claude session. Without this, a session that dies without
+  // signaling us (killed terminal, crash) leaves this process orphaned —
+  // running, heartbeating, and haunting everyone's peer list forever.
+  // stdin EOF is the clean MCP disconnect...
+  process.stdin.on("end", cleanup);
+  process.stdin.on("close", cleanup);
+  // ...and reparenting (belt and braces) means the parent died without
+  // closing our pipe.
+  const originalPpid = process.ppid;
+  orphanTimer = setInterval(() => {
+    const ppid = getParentPid(process.pid) ?? process.ppid;
+    if (ppid !== originalPpid) {
+      log("Parent Claude process exited — shutting down");
+      cleanup();
+    }
+  }, 5000);
 }
 
 main().catch((e) => {
