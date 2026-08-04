@@ -29,6 +29,20 @@ import { resolveTarget } from "./shared/resolve.ts";
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;
 
+// Refuse to double-start: SO_REUSEPORT on Linux would let two brokers share
+// the port and load-balance requests between them (old + new code at once).
+try {
+  const res = await fetch(`http://127.0.0.1:${PORT}/health`, {
+    signal: AbortSignal.timeout(1000),
+  });
+  if (res.ok) {
+    console.error(`[claude-peers broker] another broker is already on port ${PORT}, exiting`);
+    process.exit(0);
+  }
+} catch {
+  // Port is free (or whatever is there isn't a broker) — proceed
+}
+
 // --- Database setup ---
 
 const db = new Database(DB_PATH);
@@ -281,6 +295,7 @@ function handleUnregister(body: { id: string }): void {
 Bun.serve({
   port: PORT,
   hostname: "127.0.0.1",
+  reusePort: false,
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;

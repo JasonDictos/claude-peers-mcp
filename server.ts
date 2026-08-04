@@ -400,8 +400,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           isError: true,
         };
       }
+      // Self-heal: registrations that raced a broker upgrade may lack a name
+      if (!myName) {
+        try {
+          const peers = await brokerFetch<Peer[]>("/list-peers", {
+            scope: "machine",
+            cwd: myCwd,
+            git_root: myGitRoot,
+          });
+          myName = peers.find((p) => p.id === myId)?.name ?? null;
+        } catch {
+          // Broker unreachable — report what we have
+        }
+      }
       const parts = [
-        `Name: ${myName}`,
+        `Name: ${myName ?? "(not assigned yet — broker unreachable)"}`,
         `ID: ${myId}`,
         `CWD: ${myCwd}`,
       ];
