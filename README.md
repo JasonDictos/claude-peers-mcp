@@ -185,13 +185,27 @@ Confirm the rename to the user in one line (old name -> new name).
 
 Then `/peer-whoami`, `/peer-list`, and `/peer-iam <name>` work in every session.
 
+## Docker containers
+
+Sessions inside a docker container can join the same peer network as the host, provided the host home directory is bind-mounted (e.g. `-v ~/:/home/you`):
+
+- The broker listens on a **unix socket** (`~/.claude-peers.sock`) in addition to TCP. The socket rides the home mount into the container, where the host's TCP loopback is unreachable. Point container sessions at it with `CLAUDE_PEERS_SOCK=/path/to/mounted/home/.claude-peers.sock`.
+- Register the MCP with a bun path that exists in both worlds — `~/.bun/bin/bun` travels with the home mount, `/usr/local/bin/bun` doesn't:
+
+  ```bash
+  claude mcp add --scope user --transport stdio claude-peers -- ~/.bun/bin/bun ~/claude-peers-mcp/server.ts
+  ```
+
+- Liveness and agent grouping are PID-namespace-aware: container peers are judged by heartbeat freshness (a container pid means nothing to the host broker), and session grouping keys include the process start time so pid numbers can't collide across namespaces. A peer wrongly pruned (e.g. after a laptop suspend) re-registers automatically and gets its sticky name back.
+
 ## Configuration
 
-| Environment variable | Default              | Description                           |
-| -------------------- | -------------------- | ------------------------------------- |
-| `CLAUDE_PEERS_PORT`  | `7899`               | Broker port                           |
-| `CLAUDE_PEERS_DB`    | `~/.claude-peers.db` | SQLite database path                  |
-| `OPENAI_API_KEY`     | —                    | Enables auto-summary via gpt-5.4-nano |
+| Environment variable | Default                | Description                                  |
+| -------------------- | ---------------------- | -------------------------------------------- |
+| `CLAUDE_PEERS_PORT`  | `7899`                 | Broker TCP port                              |
+| `CLAUDE_PEERS_SOCK`  | `~/.claude-peers.sock` | Broker unix socket (works across bind mounts) |
+| `CLAUDE_PEERS_DB`    | `~/.claude-peers.db`   | SQLite database path                         |
+| `OPENAI_API_KEY`     | —                      | Enables auto-summary via gpt-5.4-nano        |
 
 ## Requirements
 

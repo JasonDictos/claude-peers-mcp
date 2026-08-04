@@ -12,6 +12,8 @@ function peer(overrides: Partial<Peer> & { id: string }): Peer {
     tty: null,
     name: "",
     claude_pid: null,
+    claude_key: null,
+    runtime: null,
     summary: "",
     registered_at: "2026-08-04T00:00:00Z",
     last_seen: "2026-08-04T00:00:00Z",
@@ -169,6 +171,29 @@ describe("resolveTarget agent groups (shared claude_pid)", () => {
     if (r.kind === "ambiguous") {
       expect(r.candidates.map((p) => p.name).sort()).toEqual(["eager-eddy", "goofy-joe"]);
     }
+  });
+
+  test("same claude_pid number in different namespaces (distinct claude_key) is not grouped", () => {
+    // Host session and container session both have claude pid 1234 — the
+    // start-time suffix in claude_key keeps them apart
+    const host = peer({
+      id: "llll2222",
+      name: "host-guy",
+      cwd: "/home/jason/dproxy",
+      claude_pid: 1234,
+      claude_key: "1234:100",
+      runtime: "desktop:100",
+    });
+    const container = peer({
+      id: "mmmm3333",
+      name: "docker-guy",
+      cwd: "/home/jason/dproxy",
+      claude_pid: 1234,
+      claude_key: "1234:99999",
+      runtime: "desktop:99999",
+    });
+    const r = resolveTarget([host, container], "~/dproxy", HOME);
+    expect(r.kind).toBe("ambiguous");
   });
 
   test("peers without claude_pid are never grouped", () => {

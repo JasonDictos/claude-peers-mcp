@@ -30,21 +30,33 @@ function looksLikePath(target: string): boolean {
 }
 
 /**
- * A session running subagents registers several peers sharing one claude_pid.
- * Collapse each such group to its primary (earliest registered) so a path
- * targets the top-level session, not its agents. Peers without a claude_pid
- * stay standalone.
+ * Session grouping key. Prefers the namespace-safe claude_key (pid + start
+ * time); falls back to the bare claude_pid for peers registered before
+ * claude_key existed. Null = ungroupable standalone peer.
+ */
+export function sessionKey(p: Peer): string | null {
+  if (p.claude_key) return p.claude_key;
+  if (p.claude_pid != null) return `pid:${p.claude_pid}`;
+  return null;
+}
+
+/**
+ * A session running subagents registers several peers sharing one session
+ * key. Collapse each such group to its primary (earliest registered) so a
+ * path targets the top-level session, not its agents. Peers without a
+ * session key stay standalone.
  */
 function collapseAgentGroups(matches: Peer[]): Peer[] {
   const standalone: Peer[] = [];
-  const groups = new Map<number, Peer[]>();
+  const groups = new Map<string, Peer[]>();
   for (const p of matches) {
-    if (p.claude_pid == null) {
+    const key = sessionKey(p);
+    if (key == null) {
       standalone.push(p);
     } else {
-      const group = groups.get(p.claude_pid) ?? [];
+      const group = groups.get(key) ?? [];
       group.push(p);
-      groups.set(p.claude_pid, group);
+      groups.set(key, group);
     }
   }
   const primaries = [...groups.values()].map((group) =>

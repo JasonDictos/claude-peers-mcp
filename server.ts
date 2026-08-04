@@ -32,34 +32,21 @@ import {
   getGitBranch,
   getRecentFiles,
 } from "./shared/summarize.ts";
+import { brokerFetch } from "./shared/client.ts";
+import { claudeKey, getRuntimeId } from "./shared/runtime.ts";
 
 // --- Configuration ---
 
-const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
-const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
 const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const BROKER_SCRIPT = new URL("./broker.ts", import.meta.url).pathname;
 
 // --- Broker communication ---
 
-async function brokerFetch<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BROKER_URL}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Broker error (${path}): ${res.status} ${err}`);
-  }
-  return res.json() as Promise<T>;
-}
-
 async function isBrokerAlive(): Promise<boolean> {
   try {
-    const res = await fetch(`${BROKER_URL}/health`, { signal: AbortSignal.timeout(2000) });
-    return res.ok;
+    await brokerFetch("/health", undefined, 2000);
+    return true;
   } catch {
     return false;
   }
@@ -141,6 +128,29 @@ let myName: string | null = null;
 let mySummary = "";
 let myCwd = process.cwd();
 let myGitRoot: string | null = null;
+let myTty: string | null = null;
+
+async function register(): Promise<void> {
+  const reg = await brokerFetch<RegisterResponse>("/register", {
+    pid: process.pid,
+    claude_pid: process.ppid || null,
+    claude_key: process.ppid ? claudeKey(process.ppid) : null,
+    runtime: getRuntimeId(),
+    cwd: myCwd,
+    git_root: myGitRoot,
+    tty: myTty,
+    summary: mySummary,
+  });
+  myId = reg.id;
+  myName = reg.name;
+  log(`Registered as peer ${myName} (${myId})`);
+}
+
+/** The broker prunes peers it wrongly thinks are dead (e.g. after a laptop
+ *  suspend starves container heartbeats) — a 404 means re-register. */
+function isUnknownPeerError(e: unknown): boolean {
+  return e instanceof Error && /404/.test(e.message) && /unknown peer/.test(e.message);
+}
 
 // --- MCP Server ---
 
@@ -516,6 +526,15 @@ async function pollAndPushMessages() {
       log(`Pushed message from ${fromName || msg.from_id}: ${msg.text.slice(0, 80)}`);
     }
   } catch (e) {
+    if (isUnknownPeerError(e)) {
+      log("Broker no longer knows us — re-registering");
+      try {
+        await register();
+      } catch {
+        // Broker still down, retry on next poll
+      }
+      return;
+    }
     // Broker might be down temporarily, don't crash
     log(`Poll error: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -561,18 +580,9 @@ async function main() {
   await Promise.race([summaryPromise, new Promise((r) => setTimeout(r, 3000))]);
 
   // 4. Register with broker
-  const reg = await brokerFetch<RegisterResponse>("/register", {
-    pid: process.pid,
-    claude_pid: process.ppid || null,
-    cwd: myCwd,
-    git_root: myGitRoot,
-    tty,
-    summary: initialSummary,
-  });
-  myId = reg.id;
-  myName = reg.name;
+  myTty = tty;
   mySummary = initialSummary;
-  log(`Registered as peer ${myName} (${myId})`);
+  await register();
 
   // If summary generation is still running, update it when done
   if (!initialSummary) {
@@ -601,8 +611,15 @@ async function main() {
     if (myId) {
       try {
         await brokerFetch("/heartbeat", { id: myId });
-      } catch {
-        // Non-critical
+      } catch (e) {
+        if (isUnknownPeerError(e)) {
+          try {
+            await register();
+          } catch {
+            // Broker down, retry on next beat
+          }
+        }
+        // Otherwise non-critical
       }
     }
   }, HEARTBEAT_INTERVAL_MS);

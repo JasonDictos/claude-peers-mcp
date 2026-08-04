@@ -8,6 +8,10 @@ export interface Peer {
   pid: number;
   /** PID of the Claude Code process this peer's MCP server belongs to. */
   claude_pid: number | null;
+  /** Namespace-safe session key: "<claude_pid>:<starttime>" (see runtime.ts). */
+  claude_key: string | null;
+  /** PID-namespace identity (host or container) this peer runs in. */
+  runtime: string | null;
   cwd: string;
   git_root: string | null;
   tty: string | null;
@@ -30,6 +34,8 @@ export interface Message {
 export interface RegisterRequest {
   pid: number;
   claude_pid: number | null;
+  claude_key?: string | null;
+  runtime?: string | null;
   cwd: string;
   git_root: string | null;
   tty: string | null;
