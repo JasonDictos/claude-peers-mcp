@@ -94,7 +94,7 @@ A session running subagents opens extra MCP connections, each registering as its
 You can show the name in your Claude Code status bar by pointing `statusLine` in `~/.claude/settings.json` at the bundled command:
 
 ```json
-"statusLine": { "type": "command", "command": "bun ~/claude-peers-mcp/cli.ts statusline" }
+"statusLine": { "type": "command", "command": "~/.bun/bin/bun ~/claude-peers-mcp/cli.ts statusline" }
 ```
 
 It prints `~/archiver-tools (main) · goofy-joe` and degrades gracefully (no name shown) when the broker is down.
@@ -147,11 +147,11 @@ Drop these in `~/.claude/commands/` to inspect the peer network from any session
 <!-- ~/.claude/commands/peer-whoami.md -->
 ---
 description: Show this session's claude-peers identity (name, ID, cwd)
-allowed-tools: Bash(bun ~/claude-peers-mcp/cli.ts:*)
+allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
 ---
 Peer identity of this session:
 
-!`bun ~/claude-peers-mcp/cli.ts whoami`
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts whoami`
 
 Report the identity above to the user in one line.
 ```
@@ -160,11 +160,11 @@ Report the identity above to the user in one line.
 <!-- ~/.claude/commands/peer-list.md -->
 ---
 description: List all Claude Code peers on this machine (claude-peers)
-allowed-tools: Bash(bun ~/claude-peers-mcp/cli.ts:*)
+allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
 ---
 Current peers on the claude-peers network:
 
-!`bun ~/claude-peers-mcp/cli.ts peers`
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts peers`
 
 Present the peers above as a compact table: name, ID, directory, summary.
 ```
@@ -174,11 +174,11 @@ Present the peers above as a compact table: name, ID, directory, summary.
 ---
 description: Rename this session's claude-peers name
 argument-hint: <name>
-allowed-tools: Bash(bun ~/claude-peers-mcp/cli.ts:*)
+allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
 ---
 Rename result:
 
-!`bun ~/claude-peers-mcp/cli.ts iam $ARGUMENTS`
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts iam $ARGUMENTS`
 
 Confirm the rename to the user in one line (old name -> new name).
 ```
