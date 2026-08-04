@@ -69,8 +69,12 @@ function getAncestorPids(maxDepth = 10): number[] {
 function findSelf(peers: Peer[], cwd: string): Peer | null {
   const ancestors = getAncestorPids();
   for (const pid of ancestors) {
-    const match = peers.find((p) => p.claude_pid === pid);
-    if (match) return match;
+    const matches = peers.filter((p) => p.claude_pid === pid);
+    if (matches.length > 0) {
+      // Several matches = session with subagent MCP connections; the
+      // primary (top-level session) is the earliest registration
+      return matches.reduce((a, b) => (a.registered_at <= b.registered_at ? a : b));
+    }
   }
   const byCwd = peers.filter((p) => p.cwd === cwd);
   return byCwd.length === 1 ? byCwd[0]! : null;

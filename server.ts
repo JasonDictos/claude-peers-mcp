@@ -155,6 +155,8 @@ const mcp = new Server(
 
 Every peer has a human-readable name (like "goofy-joe") and an 8-char ID — the two are interchangeable as addresses. You can also address a peer by its directory path (e.g. "~/archiver-tools"): the broker matches it against each peer's working directory and git repo. If a path matches several peers, the send fails and returns the candidates so you can pick one by name.
 
+A session running subagents appears as a group: the top-level session keeps the base name (goofy-joe) and its agents are suffixed (goofy-joe-1, goofy-joe-2). Path addressing resolves to the top-level session; use a suffixed name to reach a specific agent.
+
 IMPORTANT: When you receive a <channel source="claude-peers" ...> message, RESPOND IMMEDIATELY. Do not wait until your current task is finished. Pause what you are doing, reply to the message using send_message, then resume your work. Treat incoming peer messages like a coworker tapping you on the shoulder — answer right away, even if you're in the middle of something.
 
 Read the from_name, from_id, from_summary, and from_cwd attributes to understand who sent the message. Reply by calling send_message with their from_name or from_id.

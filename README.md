@@ -85,6 +85,10 @@ bun ~/claude-peers-mcp/cli.ts iam archiver-guy
 
 Names are normalized (lowercase, spaces become dashes) and must be unique among live peers — a collision tells you who already has the name.
 
+### Sessions with subagents
+
+A session running subagents opens extra MCP connections, each registering as its own peer. These are detected (they share the session's process) and named as suffixed children: the top-level session is `goofy-joe`, its agents `goofy-joe-1`, `goofy-joe-2`, ... Path addressing always resolves to the top-level session — agents are only reachable by their explicit suffixed name. Renaming the session (`iam`) renames its agents with it.
+
 You can show the name in your Claude Code status bar by pointing `statusLine` in `~/.claude/settings.json` at the bundled command:
 
 ```json

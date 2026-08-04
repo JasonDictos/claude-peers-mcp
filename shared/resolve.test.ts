@@ -116,6 +116,69 @@ describe("resolveTarget by path", () => {
   });
 });
 
+describe("resolveTarget agent groups (shared claude_pid)", () => {
+  const primary = peer({
+    id: "eeee5555",
+    name: "goofy-joe",
+    cwd: "/home/jason/dproxy",
+    claude_pid: 777,
+    registered_at: "2026-08-04T10:00:00Z",
+  });
+  const agent1 = peer({
+    id: "ffff6666",
+    name: "goofy-joe-1",
+    cwd: "/home/jason/dproxy",
+    claude_pid: 777,
+    registered_at: "2026-08-04T10:05:00Z",
+  });
+  const agent2 = peer({
+    id: "gggg7777",
+    name: "goofy-joe-2",
+    cwd: "/home/jason/dproxy",
+    claude_pid: 777,
+    registered_at: "2026-08-04T10:06:00Z",
+  });
+
+  test("path matching a session with agents resolves to the primary (earliest registered)", () => {
+    const r = resolveTarget([agent2, primary, agent1], "~/dproxy", HOME);
+    expect(r).toEqual({ kind: "match", peer: primary });
+  });
+
+  test("an agent is still reachable by its suffixed name", () => {
+    const r = resolveTarget([primary, agent1, agent2], "goofy-joe-2", HOME);
+    expect(r).toEqual({ kind: "match", peer: agent2 });
+  });
+
+  test("two distinct sessions in one dir are still ambiguous, candidates are the primaries", () => {
+    const other = peer({
+      id: "hhhh8888",
+      name: "eager-eddy",
+      cwd: "/home/jason/dproxy",
+      claude_pid: 888,
+      registered_at: "2026-08-04T11:00:00Z",
+    });
+    const otherAgent = peer({
+      id: "iiii9999",
+      name: "eager-eddy-1",
+      cwd: "/home/jason/dproxy",
+      claude_pid: 888,
+      registered_at: "2026-08-04T11:01:00Z",
+    });
+    const r = resolveTarget([primary, agent1, agent2, other, otherAgent], "~/dproxy", HOME);
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind === "ambiguous") {
+      expect(r.candidates.map((p) => p.name).sort()).toEqual(["eager-eddy", "goofy-joe"]);
+    }
+  });
+
+  test("peers without claude_pid are never grouped", () => {
+    const a = peer({ id: "jjjj0000", name: "old-one", cwd: "/home/jason/dproxy", claude_pid: null });
+    const b = peer({ id: "kkkk1111", name: "old-two", cwd: "/home/jason/dproxy", claude_pid: null });
+    const r = resolveTarget([a, b], "~/dproxy", HOME);
+    expect(r.kind).toBe("ambiguous");
+  });
+});
+
 describe("resolveTarget misc", () => {
   test("unknown bare word returns none", () => {
     const r = resolveTarget(peers, "not-a-peer", HOME);
