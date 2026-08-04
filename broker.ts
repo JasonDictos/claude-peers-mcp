@@ -19,9 +19,12 @@ import type {
   SendMessageRequest,
   PollMessagesRequest,
   PollMessagesResponse,
+  SendMessageResponse,
   Peer,
   Message,
 } from "./shared/types.ts";
+import { generateName } from "./shared/names.ts";
+import { resolveTarget } from "./shared/resolve.ts";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;
@@ -35,7 +38,9 @@ db.run("PRAGMA busy_timeout = 3000");
 db.run(`
   CREATE TABLE IF NOT EXISTS peers (
     id TEXT PRIMARY KEY,
+    name TEXT NOT NULL DEFAULT '',
     pid INTEGER NOT NULL,
+    claude_pid INTEGER,
     cwd TEXT NOT NULL,
     git_root TEXT,
     tty TEXT,
@@ -58,6 +63,17 @@ db.run(`
   )
 `);
 
+// Add columns introduced after the first release (the DB may predate them)
+function ensureColumn(colDef: string) {
+  try {
+    db.run(`ALTER TABLE peers ADD COLUMN ${colDef}`);
+  } catch {
+    // Column already exists
+  }
+}
+ensureColumn("name TEXT NOT NULL DEFAULT ''");
+ensureColumn("claude_pid INTEGER");
+
 // Clean up stale peers (PIDs that no longer exist) on startup
 function cleanStalePeers() {
   const peers = db.query("SELECT id, pid FROM peers").all() as { id: string; pid: number }[];
@@ -78,11 +94,26 @@ cleanStalePeers();
 // Periodically clean stale peers (every 30s)
 setInterval(cleanStalePeers, 30_000);
 
+// Name peers that registered before the name column existed
+function nameUnnamedPeers() {
+  const unnamed = db.query("SELECT id FROM peers WHERE name = ''").all() as { id: string }[];
+  for (const { id } of unnamed) {
+    db.run("UPDATE peers SET name = ? WHERE id = ?", [generateName(takenNames()), id]);
+  }
+}
+
+function takenNames(): Set<string> {
+  const rows = db.query("SELECT name FROM peers WHERE name != ''").all() as { name: string }[];
+  return new Set(rows.map((r) => r.name));
+}
+
+nameUnnamedPeers();
+
 // --- Prepared statements ---
 
 const insertPeer = db.prepare(`
-  INSERT INTO peers (id, pid, cwd, git_root, tty, summary, registered_at, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO peers (id, name, pid, claude_pid, cwd, git_root, tty, summary, registered_at, last_seen)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateLastSeen = db.prepare(`
@@ -99,14 +130,6 @@ const deletePeer = db.prepare(`
 
 const selectAllPeers = db.prepare(`
   SELECT * FROM peers
-`);
-
-const selectPeersByDirectory = db.prepare(`
-  SELECT * FROM peers WHERE cwd = ?
-`);
-
-const selectPeersByGitRoot = db.prepare(`
-  SELECT * FROM peers WHERE git_root = ?
 `);
 
 const insertMessage = db.prepare(`
@@ -145,8 +168,20 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     deletePeer.run(existing.id);
   }
 
-  insertPeer.run(id, body.pid, body.cwd, body.git_root, body.tty, body.summary, now, now);
-  return { id };
+  const name = generateName(takenNames());
+  insertPeer.run(
+    id,
+    name,
+    body.pid,
+    body.claude_pid ?? null,
+    body.cwd,
+    body.git_root,
+    body.tty,
+    body.summary,
+    now,
+    now
+  );
+  return { id, name };
 }
 
 function handleHeartbeat(body: HeartbeatRequest): void {
@@ -157,35 +192,9 @@ function handleSetSummary(body: SetSummaryRequest): void {
   updateSummary.run(body.summary, body.id);
 }
 
-function handleListPeers(body: ListPeersRequest): Peer[] {
-  let peers: Peer[];
-
-  switch (body.scope) {
-    case "machine":
-      peers = selectAllPeers.all() as Peer[];
-      break;
-    case "directory":
-      peers = selectPeersByDirectory.all(body.cwd) as Peer[];
-      break;
-    case "repo":
-      if (body.git_root) {
-        peers = selectPeersByGitRoot.all(body.git_root) as Peer[];
-      } else {
-        // No git root, fall back to directory
-        peers = selectPeersByDirectory.all(body.cwd) as Peer[];
-      }
-      break;
-    default:
-      peers = selectAllPeers.all() as Peer[];
-  }
-
-  // Exclude the requesting peer
-  if (body.exclude_id) {
-    peers = peers.filter((p) => p.id !== body.exclude_id);
-  }
-
-  // Verify each peer's process is still alive
-  return peers.filter((p) => {
+// All registered peers whose process is still alive (dead ones are pruned)
+function livePeers(): Peer[] {
+  return (selectAllPeers.all() as Peer[]).filter((p) => {
     try {
       process.kill(p.pid, 0);
       return true;
@@ -197,15 +206,59 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
   });
 }
 
-function handleSendMessage(body: SendMessageRequest): { ok: boolean; error?: string } {
-  // Verify target exists
-  const target = db.query("SELECT id FROM peers WHERE id = ?").get(body.to_id) as { id: string } | null;
-  if (!target) {
-    return { ok: false, error: `Peer ${body.to_id} not found` };
+function handleListPeers(body: ListPeersRequest): Peer[] {
+  let peers = livePeers();
+
+  switch (body.scope) {
+    case "directory":
+      peers = peers.filter((p) => p.cwd === body.cwd);
+      break;
+    case "repo":
+      if (body.git_root) {
+        peers = peers.filter((p) => p.git_root === body.git_root);
+      } else {
+        // No git root, fall back to directory
+        peers = peers.filter((p) => p.cwd === body.cwd);
+      }
+      break;
   }
 
-  insertMessage.run(body.from_id, body.to_id, body.text, new Date().toISOString());
-  return { ok: true };
+  // Exclude the requesting peer
+  if (body.exclude_id) {
+    peers = peers.filter((p) => p.id !== body.exclude_id);
+  }
+
+  return peers;
+}
+
+function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
+  const target = body.to ?? body.to_id;
+  if (!target) {
+    return { ok: false, error: "Missing target: pass `to` (peer ID, name, or path)" };
+  }
+
+  // Resolve against live peers, excluding the sender (a path can match yourself)
+  const peers = livePeers().filter((p) => p.id !== body.from_id);
+  const resolution = resolveTarget(peers, target, process.env.HOME ?? "/");
+
+  if (resolution.kind === "none") {
+    return {
+      ok: false,
+      error: `No peer matches "${target}". Live peers are listed in candidates.`,
+      candidates: peers,
+    };
+  }
+  if (resolution.kind === "ambiguous") {
+    return {
+      ok: false,
+      error: `"${target}" matches ${resolution.candidates.length} peers — re-send to one of the candidates by name or ID.`,
+      candidates: resolution.candidates,
+    };
+  }
+
+  const peer = resolution.peer;
+  insertMessage.run(body.from_id, peer.id, body.text, new Date().toISOString());
+  return { ok: true, to: { id: peer.id, name: peer.name } };
 }
 
 function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {

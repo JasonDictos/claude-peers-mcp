@@ -53,20 +53,37 @@ In another terminal, start Claude Code the same way. Then ask either one:
 
 > List all peers on this machine
 
-It'll show every running instance with their working directory, git repo, and a summary of what they're doing. Then:
+It'll show every running instance with their name (like `goofy-joe`), working directory, git repo, and a summary of what they're doing. Then:
 
-> Send a message to peer [id]: "what are you working on?"
+> Ask goofy-joe what it's working on
 
-The other Claude receives it immediately and responds.
+or address a peer by where it's running — no need to look anything up:
+
+> Tell the claude in ~/archiver-tools that the API changed
+
+Paths match a peer's working directory or its git repo (so `~/een-ports` finds a session working in `~/een-ports/src`). If a path matches more than one session, the send fails with the list of candidates so you can pick one by name.
 
 ## What Claude can do
 
-| Tool             | What it does                                                                   |
-| ---------------- | ------------------------------------------------------------------------------ |
-| `list_peers`     | Find other Claude Code instances — scoped to `machine`, `directory`, or `repo` |
-| `send_message`   | Send a message to another instance by ID (arrives instantly via channel push)  |
-| `set_summary`    | Describe what you're working on (visible to other peers)                       |
-| `check_messages` | Manually check for messages (fallback if not using channel mode)               |
+| Tool             | What it does                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------- |
+| `list_peers`     | Find other Claude Code instances — scoped to `machine`, `directory`, or `repo`              |
+| `send_message`   | Message another instance by name, ID, or directory path (arrives instantly via channel push) |
+| `whoami`         | Get this session's own name, ID, and context                                                |
+| `set_summary`    | Describe what you're working on (visible to other peers)                                    |
+| `check_messages` | Manually check for messages (fallback if not using channel mode)                            |
+
+## Peer names
+
+Every session gets a human-readable name at registration — `goofy-joe`, `eager-eddy` — unique among live peers. Names and IDs are interchangeable anywhere a target is accepted.
+
+You can show the name in your Claude Code status bar by pointing `statusLine` in `~/.claude/settings.json` at the bundled command:
+
+```json
+"statusLine": { "type": "command", "command": "bun ~/claude-peers-mcp/cli.ts statusline" }
+```
+
+It prints `~/archiver-tools (main) · goofy-joe` and degrades gracefully (no name shown) when the broker is down.
 
 ## How it works
 
@@ -99,10 +116,12 @@ You can also inspect and interact from the command line:
 ```bash
 cd ~/claude-peers-mcp
 
-bun cli.ts status            # broker status + all peers
-bun cli.ts peers             # list peers
-bun cli.ts send <id> <msg>   # send a message into a Claude session
-bun cli.ts kill-broker       # stop the broker
+bun cli.ts status                # broker status + all peers
+bun cli.ts peers                 # list peers
+bun cli.ts send <target> <msg>   # send a message (target: name, ID, or ~/path)
+bun cli.ts whoami                # this session's peer name and ID
+bun cli.ts statusline            # statusline command (Claude Code JSON on stdin)
+bun cli.ts kill-broker           # stop the broker
 ```
 
 ## Configuration
