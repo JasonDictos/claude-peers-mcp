@@ -10,11 +10,13 @@ Peer discovery and messaging MCP channel for Claude Code instances.
 
 ## Architecture
 
-- `broker.ts` — Singleton HTTP daemon on localhost:7899 + SQLite. Auto-launched by the MCP server.
+- `broker.ts` — Singleton HTTP daemon on localhost:7899 + SQLite. Auto-launched by the MCP server. Assigns each peer a unique human-readable name (`goofy-joe`) and resolves message targets (ID, name, or directory path).
 - `server.ts` — MCP stdio server, one per Claude Code instance. Connects to broker, exposes tools, pushes channel notifications.
 - `shared/types.ts` — Shared TypeScript types for broker API.
+- `shared/names.ts` — Adjective-noun name generation.
+- `shared/resolve.ts` — Pure target-resolution logic (ID → name → path, with ambiguity reporting).
 - `shared/summarize.ts` — Auto-summary generation via gpt-5.4-nano.
-- `cli.ts` — CLI utility for inspecting broker state.
+- `cli.ts` — CLI utility for inspecting broker state. Also provides `whoami` and `statusline` (identifies the calling session by walking ancestor PIDs to match the peer's `claude_pid`).
 
 ## Running
 
@@ -28,7 +30,9 @@ claude --dangerously-load-development-channels server:claude-peers
 # CLI:
 bun cli.ts status
 bun cli.ts peers
-bun cli.ts send <peer-id> <message>
+bun cli.ts send <name|id|path> <message>
+bun cli.ts whoami
+bun cli.ts statusline   # for statusLine in ~/.claude/settings.json
 bun cli.ts kill-broker
 ```
 

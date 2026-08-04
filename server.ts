@@ -24,6 +24,7 @@ import type {
   Peer,
   RegisterResponse,
   PollMessagesResponse,
+  SendMessageResponse,
   Message,
 } from "./shared/types.ts";
 import {
@@ -136,6 +137,8 @@ function getTty(): string | null {
 // --- State ---
 
 let myId: PeerId | null = null;
+let myName: string | null = null;
+let mySummary = "";
 let myCwd = process.cwd();
 let myGitRoot: string | null = null;
 
@@ -150,13 +153,16 @@ const mcp = new Server(
     },
     instructions: `You are connected to the claude-peers network. Other Claude Code instances on this machine can see you and send you messages.
 
+Every peer has a human-readable name (like "goofy-joe") and an 8-char ID — the two are interchangeable as addresses. You can also address a peer by its directory path (e.g. "~/archiver-tools"): the broker matches it against each peer's working directory and git repo. If a path matches several peers, the send fails and returns the candidates so you can pick one by name.
+
 IMPORTANT: When you receive a <channel source="claude-peers" ...> message, RESPOND IMMEDIATELY. Do not wait until your current task is finished. Pause what you are doing, reply to the message using send_message, then resume your work. Treat incoming peer messages like a coworker tapping you on the shoulder — answer right away, even if you're in the middle of something.
 
-Read the from_id, from_summary, and from_cwd attributes to understand who sent the message. Reply by calling send_message with their from_id.
+Read the from_name, from_id, from_summary, and from_cwd attributes to understand who sent the message. Reply by calling send_message with their from_name or from_id.
 
 Available tools:
 - list_peers: Discover other Claude Code instances (scope: machine/directory/repo)
-- send_message: Send a message to another instance by ID
+- send_message: Send a message to another instance by name, ID, or directory path
+- whoami: Get your own name, ID, and context (use your name when referring to yourself)
 - set_summary: Set a 1-2 sentence summary of what you're working on (visible to other peers)
 - check_messages: Manually check for new messages
 
@@ -187,20 +193,30 @@ const TOOLS = [
   {
     name: "send_message",
     description:
-      "Send a message to another Claude Code instance by peer ID. The message will be pushed into their session immediately via channel notification.",
+      "Send a message to another Claude Code instance. Address it by peer name (e.g. \"goofy-joe\"), peer ID, or directory path (e.g. \"~/archiver-tools\" — matches the peer's working directory or git repo). The message is pushed into their session immediately via channel notification.",
     inputSchema: {
       type: "object" as const,
       properties: {
-        to_id: {
+        to: {
           type: "string" as const,
-          description: "The peer ID of the target Claude Code instance (from list_peers)",
+          description:
+            "Target peer: a name or ID from list_peers, or a directory path like ~/archiver-tools",
         },
         message: {
           type: "string" as const,
           description: "The message to send",
         },
       },
-      required: ["to_id", "message"],
+      required: ["to", "message"],
+    },
+  },
+  {
+    name: "whoami",
+    description:
+      "Get this instance's own identity on the peer network: name (e.g. \"goofy-joe\"), peer ID, working directory, git repo, and current summary. Use the name when introducing yourself to other peers or rendering status.",
+    inputSchema: {
+      type: "object" as const,
+      properties: {},
     },
   },
   {
@@ -262,6 +278,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
         const lines = peers.map((p) => {
           const parts = [
+            `Name: ${p.name}`,
             `ID: ${p.id}`,
             `PID: ${p.pid}`,
             `CWD: ${p.cwd}`,
@@ -295,27 +312,46 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
 
     case "send_message": {
-      const { to_id, message } = args as { to_id: string; message: string };
+      const { to, to_id, message } = args as { to?: string; to_id?: string; message: string };
+      const target = to ?? to_id;
       if (!myId) {
         return {
           content: [{ type: "text" as const, text: "Not registered with broker yet" }],
           isError: true,
         };
       }
+      if (!target) {
+        return {
+          content: [{ type: "text" as const, text: "Missing `to` (peer name, ID, or path)" }],
+          isError: true,
+        };
+      }
       try {
-        const result = await brokerFetch<{ ok: boolean; error?: string }>("/send-message", {
+        const result = await brokerFetch<SendMessageResponse>("/send-message", {
           from_id: myId,
-          to_id,
+          to: target,
           text: message,
         });
         if (!result.ok) {
+          let text = `Failed to send: ${result.error}`;
+          if (result.candidates && result.candidates.length > 0) {
+            const lines = result.candidates.map(
+              (p) => `- ${p.name} (${p.id}) in ${p.cwd}${p.summary ? ` — ${p.summary}` : ""}`
+            );
+            text += `\n${lines.join("\n")}`;
+          }
           return {
-            content: [{ type: "text" as const, text: `Failed to send: ${result.error}` }],
+            content: [{ type: "text" as const, text }],
             isError: true,
           };
         }
         return {
-          content: [{ type: "text" as const, text: `Message sent to peer ${to_id}` }],
+          content: [
+            {
+              type: "text" as const,
+              text: `Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`,
+            },
+          ],
         };
       } catch (e) {
         return {
@@ -340,6 +376,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       try {
         await brokerFetch("/set-summary", { id: myId, summary });
+        mySummary = summary;
         return {
           content: [{ type: "text" as const, text: `Summary updated: "${summary}"` }],
         };
@@ -354,6 +391,37 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           isError: true,
         };
       }
+    }
+
+    case "whoami": {
+      if (!myId) {
+        return {
+          content: [{ type: "text" as const, text: "Not registered with broker yet" }],
+          isError: true,
+        };
+      }
+      // Refresh from the broker: the name may have been assigned after a
+      // raced registration, or changed via `cli.ts iam` / /set-name
+      try {
+        const peers = await brokerFetch<Peer[]>("/list-peers", {
+          scope: "machine",
+          cwd: myCwd,
+          git_root: myGitRoot,
+        });
+        myName = peers.find((p) => p.id === myId)?.name ?? myName;
+      } catch {
+        // Broker unreachable — report what we have
+      }
+      const parts = [
+        `Name: ${myName ?? "(not assigned yet — broker unreachable)"}`,
+        `ID: ${myId}`,
+        `CWD: ${myCwd}`,
+      ];
+      if (myGitRoot) parts.push(`Repo: ${myGitRoot}`);
+      if (mySummary) parts.push(`Summary: ${mySummary}`);
+      return {
+        content: [{ type: "text" as const, text: parts.join("\n") }],
+      };
     }
 
     case "check_messages": {
@@ -409,6 +477,7 @@ async function pollAndPushMessages() {
 
     for (const msg of result.messages) {
       // Look up the sender's info for context
+      let fromName = "";
       let fromSummary = "";
       let fromCwd = "";
       try {
@@ -419,6 +488,7 @@ async function pollAndPushMessages() {
         });
         const sender = peers.find((p) => p.id === msg.from_id);
         if (sender) {
+          fromName = sender.name;
           fromSummary = sender.summary;
           fromCwd = sender.cwd;
         }
@@ -433,6 +503,7 @@ async function pollAndPushMessages() {
           content: msg.text,
           meta: {
             from_id: msg.from_id,
+            from_name: fromName,
             from_summary: fromSummary,
             from_cwd: fromCwd,
             sent_at: msg.sent_at,
@@ -440,7 +511,7 @@ async function pollAndPushMessages() {
         },
       });
 
-      log(`Pushed message from ${msg.from_id}: ${msg.text.slice(0, 80)}`);
+      log(`Pushed message from ${fromName || msg.from_id}: ${msg.text.slice(0, 80)}`);
     }
   } catch (e) {
     // Broker might be down temporarily, don't crash
@@ -490,13 +561,16 @@ async function main() {
   // 4. Register with broker
   const reg = await brokerFetch<RegisterResponse>("/register", {
     pid: process.pid,
+    claude_pid: process.ppid || null,
     cwd: myCwd,
     git_root: myGitRoot,
     tty,
     summary: initialSummary,
   });
   myId = reg.id;
-  log(`Registered as peer ${myId}`);
+  myName = reg.name;
+  mySummary = initialSummary;
+  log(`Registered as peer ${myName} (${myId})`);
 
   // If summary generation is still running, update it when done
   if (!initialSummary) {
@@ -504,6 +578,7 @@ async function main() {
       if (initialSummary && myId) {
         try {
           await brokerFetch("/set-summary", { id: myId, summary: initialSummary });
+          mySummary = initialSummary;
           log(`Late auto-summary applied: ${initialSummary}`);
         } catch {
           // Non-critical

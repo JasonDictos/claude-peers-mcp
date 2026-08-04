@@ -3,7 +3,11 @@ export type PeerId = string;
 
 export interface Peer {
   id: PeerId;
+  /** Human-readable alias, e.g. "goofy-joe". Unique among live peers. */
+  name: string;
   pid: number;
+  /** PID of the Claude Code process this peer's MCP server belongs to. */
+  claude_pid: number | null;
   cwd: string;
   git_root: string | null;
   tty: string | null;
@@ -25,6 +29,7 @@ export interface Message {
 
 export interface RegisterRequest {
   pid: number;
+  claude_pid: number | null;
   cwd: string;
   git_root: string | null;
   tty: string | null;
@@ -33,6 +38,7 @@ export interface RegisterRequest {
 
 export interface RegisterResponse {
   id: PeerId;
+  name: string;
 }
 
 export interface HeartbeatRequest {
@@ -54,8 +60,20 @@ export interface ListPeersRequest {
 
 export interface SendMessageRequest {
   from_id: PeerId;
-  to_id: PeerId;
+  /** Target: peer ID, peer name, or directory path (~ allowed). */
+  to?: string;
+  /** Legacy alias for `to` (pre-name clients). */
+  to_id?: PeerId;
   text: string;
+}
+
+export interface SendMessageResponse {
+  ok: boolean;
+  error?: string;
+  /** Resolved recipient on success. */
+  to?: { id: PeerId; name: string };
+  /** On ambiguous/no-match errors: peers the sender could target instead. */
+  candidates?: Peer[];
 }
 
 export interface PollMessagesRequest {

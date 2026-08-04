@@ -5,16 +5,21 @@
  * Utility commands for managing the broker and inspecting peers.
  *
  * Usage:
- *   bun cli.ts status          — Show broker status and all peers
- *   bun cli.ts peers           — List all peers
- *   bun cli.ts send <id> <msg> — Send a message to a peer
- *   bun cli.ts kill-broker     — Stop the broker daemon
+ *   bun cli.ts status              — Show broker status and all peers
+ *   bun cli.ts peers               — List all peers
+ *   bun cli.ts send <target> <msg> — Send a message (target: name, ID, or path)
+ *   bun cli.ts whoami              — Show this session's peer name and ID
+ *   bun cli.ts iam <name>          — Rename this session's peer
+ *   bun cli.ts statusline          — Statusline command (reads Claude Code JSON on stdin)
+ *   bun cli.ts kill-broker         — Stop the broker daemon
  */
+
+import type { Peer, SendMessageResponse } from "./shared/types.ts";
 
 const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
 
-async function brokerFetch<T>(path: string, body?: unknown): Promise<T> {
+async function brokerFetch<T>(path: string, body?: unknown, timeoutMs = 3000): Promise<T> {
   const opts: RequestInit = body
     ? {
         method: "POST",
@@ -24,12 +29,59 @@ async function brokerFetch<T>(path: string, body?: unknown): Promise<T> {
     : {};
   const res = await fetch(`${BROKER_URL}${path}`, {
     ...opts,
-    signal: AbortSignal.timeout(3000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
     throw new Error(`${res.status}: ${await res.text()}`);
   }
   return res.json() as Promise<T>;
+}
+
+function listAllPeers(timeoutMs = 3000): Promise<Peer[]> {
+  return brokerFetch<Peer[]>("/list-peers", { scope: "machine", cwd: "/", git_root: null }, timeoutMs);
+}
+
+function formatPeer(p: Peer): string {
+  const parts = [`${p.name}  ${p.id}  PID:${p.pid}  ${p.cwd}`];
+  if (p.summary) parts.push(`  Summary: ${p.summary}`);
+  return parts.join("\n");
+}
+
+/** PIDs of this process's ancestors (nearest first), for claude_pid matching. */
+function getAncestorPids(maxDepth = 10): number[] {
+  const ancestors: number[] = [];
+  let pid = process.pid;
+  for (let i = 0; i < maxDepth; i++) {
+    const proc = Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(pid)]);
+    const ppid = parseInt(new TextDecoder().decode(proc.stdout).trim(), 10);
+    if (!ppid || ppid <= 1) break;
+    ancestors.push(ppid);
+    pid = ppid;
+  }
+  return ancestors;
+}
+
+/**
+ * Find the peer belonging to the Claude Code session this command runs inside.
+ * Primary: a peer whose claude_pid is one of our ancestor processes.
+ * Fallback: a unique cwd match.
+ */
+function findSelf(peers: Peer[], cwd: string): Peer | null {
+  const ancestors = getAncestorPids();
+  for (const pid of ancestors) {
+    const match = peers.find((p) => p.claude_pid === pid);
+    if (match) return match;
+  }
+  const byCwd = peers.filter((p) => p.cwd === cwd);
+  return byCwd.length === 1 ? byCwd[0]! : null;
+}
+
+function getGitBranch(cwd: string): string | null {
+  const proc = Bun.spawnSync(["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"], {
+    stderr: "ignore",
+  });
+  const branch = new TextDecoder().decode(proc.stdout).trim();
+  return proc.exitCode === 0 && branch ? branch : null;
 }
 
 const cmd = process.argv[2];
@@ -42,25 +94,10 @@ switch (cmd) {
       console.log(`URL: ${BROKER_URL}`);
 
       if (health.peers > 0) {
-        const peers = await brokerFetch<
-          Array<{
-            id: string;
-            pid: number;
-            cwd: string;
-            git_root: string | null;
-            tty: string | null;
-            summary: string;
-            last_seen: string;
-          }>
-        >("/list-peers", {
-          scope: "machine",
-          cwd: "/",
-          git_root: null,
-        });
-
+        const peers = await listAllPeers();
         console.log("\nPeers:");
         for (const p of peers) {
-          console.log(`  ${p.id}  PID:${p.pid}  ${p.cwd}`);
+          console.log(`  ${p.name}  ${p.id}  PID:${p.pid}  ${p.cwd}`);
           if (p.summary) console.log(`         ${p.summary}`);
           if (p.tty) console.log(`         TTY: ${p.tty}`);
           console.log(`         Last seen: ${p.last_seen}`);
@@ -74,29 +111,12 @@ switch (cmd) {
 
   case "peers": {
     try {
-      const peers = await brokerFetch<
-        Array<{
-          id: string;
-          pid: number;
-          cwd: string;
-          git_root: string | null;
-          tty: string | null;
-          summary: string;
-          last_seen: string;
-        }>
-      >("/list-peers", {
-        scope: "machine",
-        cwd: "/",
-        git_root: null,
-      });
-
+      const peers = await listAllPeers();
       if (peers.length === 0) {
         console.log("No peers registered.");
       } else {
         for (const p of peers) {
-          const parts = [`${p.id}  PID:${p.pid}  ${p.cwd}`];
-          if (p.summary) parts.push(`  Summary: ${p.summary}`);
-          console.log(parts.join("\n"));
+          console.log(formatPeer(p));
         }
       }
     } catch {
@@ -106,22 +126,27 @@ switch (cmd) {
   }
 
   case "send": {
-    const toId = process.argv[3];
+    const target = process.argv[3];
     const msg = process.argv.slice(4).join(" ");
-    if (!toId || !msg) {
-      console.error("Usage: bun cli.ts send <peer-id> <message>");
+    if (!target || !msg) {
+      console.error("Usage: bun cli.ts send <name|id|path> <message>");
       process.exit(1);
     }
     try {
-      const result = await brokerFetch<{ ok: boolean; error?: string }>("/send-message", {
+      const result = await brokerFetch<SendMessageResponse>("/send-message", {
         from_id: "cli",
-        to_id: toId,
+        to: target,
         text: msg,
       });
       if (result.ok) {
-        console.log(`Message sent to ${toId}`);
+        console.log(`Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`);
       } else {
         console.error(`Failed: ${result.error}`);
+        if (result.candidates && result.candidates.length > 0) {
+          for (const p of result.candidates) {
+            console.error(`  ${p.name}  ${p.id}  ${p.cwd}${p.summary ? ` — ${p.summary}` : ""}`);
+          }
+        }
       }
     } catch (e) {
       console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
@@ -129,12 +154,89 @@ switch (cmd) {
     break;
   }
 
+  case "iam": {
+    const newName = process.argv[3];
+    if (!newName) {
+      console.error("Usage: bun cli.ts iam <name>");
+      process.exit(1);
+    }
+    try {
+      const peers = await listAllPeers();
+      const self = findSelf(peers, process.cwd());
+      if (!self) {
+        console.error("Not inside a registered Claude Code session — can't tell which peer is me.");
+        process.exit(1);
+      }
+      const result = await brokerFetch<{ ok: boolean; error?: string; name?: string }>("/set-name", {
+        id: self.id,
+        name: newName,
+      });
+      if (result.ok) {
+        console.log(`Renamed ${self.name} -> ${result.name} (${self.id})`);
+      } else {
+        console.error(`Failed: ${result.error}`);
+        process.exit(1);
+      }
+    } catch (e) {
+      console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    }
+    break;
+  }
+
+  case "whoami": {
+    try {
+      const peers = await listAllPeers();
+      const self = findSelf(peers, process.cwd());
+      if (self) {
+        console.log(`${self.name} (${self.id})  ${self.cwd}`);
+        if (self.summary) console.log(self.summary);
+      } else {
+        console.log("Not inside a registered Claude Code session.");
+      }
+    } catch {
+      console.log("Broker is not running.");
+    }
+    break;
+  }
+
+  case "statusline": {
+    // Reads Claude Code's statusline JSON on stdin. Must be fast and must
+    // never fail — degrade to cwd (+ branch) if the broker is unreachable.
+    let cwd = process.cwd();
+    try {
+      const input = JSON.parse(await Bun.stdin.text());
+      cwd = input.cwd ?? input.workspace?.current_dir ?? cwd;
+    } catch {
+      // No/bad stdin — fall back to process cwd
+    }
+
+    const home = process.env.HOME ?? "";
+    const short = home && cwd.startsWith(home) ? "~" + cwd.slice(home.length) : cwd;
+    const branch = getGitBranch(cwd);
+
+    let name: string | null = null;
+    try {
+      const peers = await listAllPeers(300);
+      name = findSelf(peers, cwd)?.name ?? null;
+    } catch {
+      // Broker down — no name
+    }
+
+    let line = `\x1b[36m${short}\x1b[0m`;
+    if (branch) line += ` \x1b[93m(${branch})\x1b[0m`;
+    if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
+    process.stdout.write(line);
+    break;
+  }
+
   case "kill-broker": {
     try {
       const health = await brokerFetch<{ status: string; peers: number }>("/health");
       console.log(`Broker has ${health.peers} peer(s). Shutting down...`);
-      // Find and kill the broker process on the port
-      const proc = Bun.spawnSync(["lsof", "-ti", `:${BROKER_PORT}`]);
+      // Kill only the process LISTENING on the port — a bare `lsof -ti :port`
+      // also lists every client with a connection to it (MCP servers, us)
+      const proc = Bun.spawnSync(["lsof", "-ti", `:${BROKER_PORT}`, "-sTCP:LISTEN"]);
       const pids = new TextDecoder()
         .decode(proc.stdout)
         .trim()
@@ -154,8 +256,11 @@ switch (cmd) {
     console.log(`claude-peers CLI
 
 Usage:
-  bun cli.ts status          Show broker status and all peers
-  bun cli.ts peers           List all peers
-  bun cli.ts send <id> <msg> Send a message to a peer
-  bun cli.ts kill-broker     Stop the broker daemon`);
+  bun cli.ts status              Show broker status and all peers
+  bun cli.ts peers               List all peers
+  bun cli.ts send <target> <msg> Send a message (target: name, ID, or ~/path)
+  bun cli.ts whoami              Show this session's peer name and ID
+  bun cli.ts iam <name>          Rename this session's peer
+  bun cli.ts statusline          Statusline command (Claude Code JSON on stdin)
+  bun cli.ts kill-broker         Stop the broker daemon`);
 }
