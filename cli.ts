@@ -9,6 +9,7 @@
  *   bun cli.ts peers               — List all peers
  *   bun cli.ts send <target> <msg> — Send a message (target: name, ID, or path)
  *   bun cli.ts whoami              — Show this session's peer name and ID
+ *   bun cli.ts iam <name>          — Rename this session's peer
  *   bun cli.ts statusline          — Statusline command (reads Claude Code JSON on stdin)
  *   bun cli.ts kill-broker         — Stop the broker daemon
  */
@@ -153,6 +154,36 @@ switch (cmd) {
     break;
   }
 
+  case "iam": {
+    const newName = process.argv[3];
+    if (!newName) {
+      console.error("Usage: bun cli.ts iam <name>");
+      process.exit(1);
+    }
+    try {
+      const peers = await listAllPeers();
+      const self = findSelf(peers, process.cwd());
+      if (!self) {
+        console.error("Not inside a registered Claude Code session — can't tell which peer is me.");
+        process.exit(1);
+      }
+      const result = await brokerFetch<{ ok: boolean; error?: string; name?: string }>("/set-name", {
+        id: self.id,
+        name: newName,
+      });
+      if (result.ok) {
+        console.log(`Renamed ${self.name} -> ${result.name} (${self.id})`);
+      } else {
+        console.error(`Failed: ${result.error}`);
+        process.exit(1);
+      }
+    } catch (e) {
+      console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    }
+    break;
+  }
+
   case "whoami": {
     try {
       const peers = await listAllPeers();
@@ -229,6 +260,7 @@ Usage:
   bun cli.ts peers               List all peers
   bun cli.ts send <target> <msg> Send a message (target: name, ID, or ~/path)
   bun cli.ts whoami              Show this session's peer name and ID
+  bun cli.ts iam <name>          Rename this session's peer
   bun cli.ts statusline          Statusline command (Claude Code JSON on stdin)
   bun cli.ts kill-broker         Stop the broker daemon`);
 }

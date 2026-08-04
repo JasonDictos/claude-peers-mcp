@@ -206,6 +206,28 @@ function handleSetSummary(body: SetSummaryRequest): void {
   updateSummary.run(body.summary, body.id);
 }
 
+function handleSetName(body: { id: string; name: string }): {
+  ok: boolean;
+  error?: string;
+  name?: string;
+} {
+  // Normalize to the same shape as generated names: lowercase, dash-separated
+  const name = (body.name ?? "").trim().toLowerCase().replace(/\s+/g, "-");
+  if (!name || name.length > 64) {
+    return { ok: false, error: "Name must be 1-64 characters" };
+  }
+  const peer = db.query("SELECT id FROM peers WHERE id = ?").get(body.id) as { id: string } | null;
+  if (!peer) {
+    return { ok: false, error: `Peer ${body.id} not found` };
+  }
+  const clash = livePeers().find((p) => p.id !== body.id && p.name.toLowerCase() === name);
+  if (clash) {
+    return { ok: false, error: `Name "${name}" is already taken by peer ${clash.id} in ${clash.cwd}` };
+  }
+  db.run("UPDATE peers SET name = ? WHERE id = ?", [name, body.id]);
+  return { ok: true, name };
+}
+
 // All registered peers whose process is still alive (dead ones are pruned)
 function livePeers(): Peer[] {
   return (selectAllPeers.all() as Peer[]).filter((p) => {
@@ -319,6 +341,8 @@ Bun.serve({
         case "/set-summary":
           handleSetSummary(body as SetSummaryRequest);
           return Response.json({ ok: true });
+        case "/set-name":
+          return Response.json(handleSetName(body as { id: string; name: string }));
         case "/list-peers":
           return Response.json(handleListPeers(body as ListPeersRequest));
         case "/send-message":
