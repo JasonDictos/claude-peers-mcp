@@ -264,9 +264,23 @@ switch (cmd) {
       // Broker down — no name
     }
 
+    // Docker detection: /.dockerenv is the compose/docker marker; cgroup
+    // scan covers other container runtimes. Cheap sync checks, never throw.
+    let inDocker = false;
+    try {
+      const { existsSync, readFileSync } = await import("node:fs");
+      inDocker =
+        existsSync("/.dockerenv") ||
+        (existsSync("/proc/1/cgroup") &&
+          /docker|containerd|kubepods/.test(readFileSync("/proc/1/cgroup", "utf8")));
+    } catch {
+      // Unreadable proc — assume host
+    }
+
     let line = `\x1b[36m${short}\x1b[0m`;
     if (branch) line += ` \x1b[93m(${branch})\x1b[0m`;
     if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
+    line += inDocker ? ` \x1b[94m[docker]\x1b[0m` : ` \x1b[90m[host]\x1b[0m`;
     process.stdout.write(line);
     break;
   }
