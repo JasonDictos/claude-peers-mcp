@@ -24,24 +24,40 @@ import type {
   Message,
 } from "./shared/types.ts";
 import { generateName, childName } from "./shared/names.ts";
-import { resolveTarget } from "./shared/resolve.ts";
+import { resolveTarget, sessionKey } from "./shared/resolve.ts";
+import { getRuntimeId } from "./shared/runtime.ts";
+import { existsSync, unlinkSync } from "node:fs";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;
+const SOCKET_PATH = process.env.CLAUDE_PEERS_SOCK ?? `${process.env.HOME}/.claude-peers.sock`;
+
+// This broker's PID namespace. Peers registered from another runtime (e.g. a
+// docker container) can't be liveness-checked via pid — heartbeats rule there.
+const MY_RUNTIME = getRuntimeId();
+const HEARTBEAT_STALE_MS = 60_000;
 
 // Refuse to double-start: SO_REUSEPORT on Linux would let two brokers share
 // the port and load-balance requests between them (old + new code at once).
-try {
-  const res = await fetch(`http://127.0.0.1:${PORT}/health`, {
-    signal: AbortSignal.timeout(1000),
-  });
-  if (res.ok) {
-    console.error(`[claude-peers broker] another broker is already on port ${PORT}, exiting`);
-    process.exit(0);
+// The unix socket is checked too — inside a container the TCP port is a
+// different namespace, but the socket is shared through the home mount.
+async function brokerAnswers(url: string, opts: { unix?: string } = {}): Promise<boolean> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(1000), ...opts });
+    return res.ok;
+  } catch {
+    return false;
   }
-} catch {
-  // Port is free (or whatever is there isn't a broker) — proceed
 }
+if (
+  (await brokerAnswers("http://localhost/health", { unix: SOCKET_PATH })) ||
+  (await brokerAnswers(`http://127.0.0.1:${PORT}/health`))
+) {
+  console.error(`[claude-peers broker] another broker is already running, exiting`);
+  process.exit(0);
+}
+// No listener answered — remove a stale socket file so we can bind
+if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
 
 // --- Database setup ---
 
@@ -97,16 +113,32 @@ function ensureColumn(colDef: string) {
 }
 ensureColumn("name TEXT NOT NULL DEFAULT ''");
 ensureColumn("claude_pid INTEGER");
+ensureColumn("claude_key TEXT");
+ensureColumn("runtime TEXT");
 
-// Clean up stale peers (PIDs that no longer exist) on startup
+/**
+ * Liveness: pid check (signal 0) when the peer shares our PID namespace,
+ * heartbeat freshness when it doesn't (container peer seen from host or
+ * vice versa — its pid means nothing here, possibly someone else's process).
+ * Legacy rows without a runtime are treated as local.
+ */
+function isPeerAlive(p: Peer): boolean {
+  if (p.runtime && p.runtime !== MY_RUNTIME) {
+    return Date.now() - Date.parse(p.last_seen) < HEARTBEAT_STALE_MS;
+  }
+  try {
+    process.kill(p.pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Clean up stale peers on startup
 function cleanStalePeers() {
-  const peers = db.query("SELECT id, pid FROM peers").all() as { id: string; pid: number }[];
+  const peers = db.query("SELECT * FROM peers").all() as Peer[];
   for (const peer of peers) {
-    try {
-      // Check if process is still alive (signal 0 doesn't kill, just checks)
-      process.kill(peer.pid, 0);
-    } catch {
-      // Process doesn't exist, remove it
+    if (!isPeerAlive(peer)) {
       db.run("DELETE FROM peers WHERE id = ?", [peer.id]);
       db.run("DELETE FROM messages WHERE to_id = ? AND delivered = 0", [peer.id]);
     }
@@ -139,36 +171,31 @@ function bindName(cwd: string, name: string) {
   );
 }
 
-/** True if no other live peer of the same claude_pid registered earlier. */
+/** True if no other live peer of the same session registered earlier. */
 function isPrimary(peer: Peer, live: Peer[]): boolean {
-  if (peer.claude_pid == null) return true;
+  const key = sessionKey(peer);
+  if (key == null) return true;
   return !live.some(
     (p) =>
       p.id !== peer.id &&
-      p.claude_pid === peer.claude_pid &&
+      sessionKey(p) === key &&
       p.registered_at < peer.registered_at
   );
 }
 
 nameUnnamedPeers();
 
-// Rename agent peers (same claude_pid as an earlier registration) to the
+// Rename agent peers (same session as an earlier registration) to the
 // suffix scheme — fixes groups that registered before this behavior existed
 function normalizeAgentNames() {
-  const all = db.query("SELECT * FROM peers WHERE claude_pid IS NOT NULL").all() as Peer[];
-  const alive = all.filter((p) => {
-    try {
-      process.kill(p.pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-  const groups = new Map<number, Peer[]>();
+  const all = db.query("SELECT * FROM peers").all() as Peer[];
+  const alive = all.filter((p) => sessionKey(p) != null && isPeerAlive(p));
+  const groups = new Map<string, Peer[]>();
   for (const p of alive) {
-    const group = groups.get(p.claude_pid!) ?? [];
+    const key = sessionKey(p)!;
+    const group = groups.get(key) ?? [];
     group.push(p);
-    groups.set(p.claude_pid!, group);
+    groups.set(key, group);
   }
   for (const group of groups.values()) {
     if (group.length < 2) continue;
@@ -188,14 +215,9 @@ normalizeAgentNames();
 // Seed bindings for live primaries whose directory has none yet, so names
 // that predate stickiness become sticky from here on (existing bindings win)
 function seedNameBindings() {
-  const alive = (db.query("SELECT * FROM peers WHERE name != ''").all() as Peer[]).filter((p) => {
-    try {
-      process.kill(p.pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  });
+  const alive = (db.query("SELECT * FROM peers WHERE name != ''").all() as Peer[]).filter(
+    isPeerAlive
+  );
   const primaries = alive
     .filter((p) => isPrimary(p, alive))
     .sort((a, b) => a.registered_at.localeCompare(b.registered_at));
@@ -212,8 +234,8 @@ seedNameBindings();
 // --- Prepared statements ---
 
 const insertPeer = db.prepare(`
-  INSERT INTO peers (id, name, pid, claude_pid, cwd, git_root, tty, summary, registered_at, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO peers (id, name, pid, claude_pid, claude_key, runtime, cwd, git_root, tty, summary, registered_at, last_seen)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateLastSeen = db.prepare(`
@@ -274,9 +296,9 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   // Extra registrations from the same Claude process are subagent MCP
   // connections — name them as suffixed children of the session's primary
   let name: string;
-  const siblings = body.claude_pid != null
-    ? live.filter((p) => p.claude_pid === body.claude_pid)
-    : [];
+  const myKey =
+    body.claude_key ?? (body.claude_pid != null ? `pid:${body.claude_pid}` : null);
+  const siblings = myKey ? live.filter((p) => sessionKey(p) === myKey) : [];
   if (siblings.length > 0) {
     const primary = siblings.reduce((a, b) => (a.registered_at <= b.registered_at ? a : b));
     name = childName(primary.name, taken);
@@ -298,6 +320,8 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     name,
     body.pid,
     body.claude_pid ?? null,
+    body.claude_key ?? null,
+    body.runtime ?? null,
     body.cwd,
     body.git_root,
     body.tty,
@@ -308,8 +332,13 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   return { id, name };
 }
 
-function handleHeartbeat(body: HeartbeatRequest): void {
+/** Returns false when the peer is unknown (pruned) — caller sends 404 so the
+ *  MCP server re-registers instead of heartbeating into the void. */
+function handleHeartbeat(body: HeartbeatRequest): boolean {
+  const exists = db.query("SELECT id FROM peers WHERE id = ?").get(body.id);
+  if (!exists) return false;
   updateLastSeen.run(new Date().toISOString(), body.id);
+  return true;
 }
 
 function handleSetSummary(body: SetSummaryRequest): void {
@@ -343,10 +372,11 @@ function handleSetName(body: { id: string; name: string }): {
 
   // Renaming a session's primary carries its agent peers along:
   // old-name-N -> new-name-N
-  if (peer.claude_pid != null) {
+  const key = sessionKey(peer);
+  if (key != null) {
     const childPattern = new RegExp(`^${peer.name}-(\\d+)$`);
     const agents = livePeers().filter(
-      (p) => p.id !== body.id && p.claude_pid === peer.claude_pid && childPattern.test(p.name)
+      (p) => p.id !== body.id && sessionKey(p) === key && childPattern.test(p.name)
     );
     const taken = takenNames();
     for (const agent of agents) {
@@ -359,17 +389,12 @@ function handleSetName(body: { id: string; name: string }): {
   return { ok: true, name };
 }
 
-// All registered peers whose process is still alive (dead ones are pruned)
+// All registered peers still alive (dead ones are pruned)
 function livePeers(): Peer[] {
   return (selectAllPeers.all() as Peer[]).filter((p) => {
-    try {
-      process.kill(p.pid, 0);
-      return true;
-    } catch {
-      // Clean up dead peer
-      deletePeer.run(p.id);
-      return false;
-    }
+    if (isPeerAlive(p)) return true;
+    deletePeer.run(p.id);
+    return false;
   });
 }
 
@@ -428,7 +453,14 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
   return { ok: true, to: { id: peer.id, name: peer.name } };
 }
 
-function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse {
+function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse | null {
+  const exists = db.query("SELECT id FROM peers WHERE id = ?").get(body.id);
+  if (!exists) return null;
+
+  // Polling doubles as a heartbeat — container peers are liveness-checked
+  // by last_seen alone
+  updateLastSeen.run(new Date().toISOString(), body.id);
+
   const messages = selectUndelivered.all(body.id) as Message[];
 
   // Mark them as delivered
@@ -445,52 +477,87 @@ function handleUnregister(body: { id: string }): void {
 
 // --- HTTP Server ---
 
+async function handleRequest(req: Request): Promise<Response> {
+  const url = new URL(req.url);
+  const path = url.pathname;
+
+  if (req.method !== "POST") {
+    if (path === "/health") {
+      return Response.json({ status: "ok", peers: (selectAllPeers.all() as Peer[]).length });
+    }
+    return new Response("claude-peers broker", { status: 200 });
+  }
+
+  try {
+    const body = await req.json();
+
+    switch (path) {
+      case "/register":
+        return Response.json(handleRegister(body as RegisterRequest));
+      case "/heartbeat":
+        if (!handleHeartbeat(body as HeartbeatRequest)) {
+          return Response.json({ error: "unknown peer" }, { status: 404 });
+        }
+        return Response.json({ ok: true });
+      case "/set-summary":
+        handleSetSummary(body as SetSummaryRequest);
+        return Response.json({ ok: true });
+      case "/set-name":
+        return Response.json(handleSetName(body as { id: string; name: string }));
+      case "/list-peers":
+        return Response.json(handleListPeers(body as ListPeersRequest));
+      case "/send-message":
+        return Response.json(handleSendMessage(body as SendMessageRequest));
+      case "/poll-messages": {
+        const result = handlePollMessages(body as PollMessagesRequest);
+        if (result === null) {
+          return Response.json({ error: "unknown peer" }, { status: 404 });
+        }
+        return Response.json(result);
+      }
+      case "/unregister":
+        handleUnregister(body as { id: string });
+        return Response.json({ ok: true });
+      default:
+        return Response.json({ error: "not found" }, { status: 404 });
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return Response.json({ error: msg }, { status: 500 });
+  }
+}
+
+// TCP for host-local clients and backward compat
 Bun.serve({
   port: PORT,
   hostname: "127.0.0.1",
   reusePort: false,
-  async fetch(req) {
-    const url = new URL(req.url);
-    const path = url.pathname;
-
-    if (req.method !== "POST") {
-      if (path === "/health") {
-        return Response.json({ status: "ok", peers: (selectAllPeers.all() as Peer[]).length });
-      }
-      return new Response("claude-peers broker", { status: 200 });
-    }
-
-    try {
-      const body = await req.json();
-
-      switch (path) {
-        case "/register":
-          return Response.json(handleRegister(body as RegisterRequest));
-        case "/heartbeat":
-          handleHeartbeat(body as HeartbeatRequest);
-          return Response.json({ ok: true });
-        case "/set-summary":
-          handleSetSummary(body as SetSummaryRequest);
-          return Response.json({ ok: true });
-        case "/set-name":
-          return Response.json(handleSetName(body as { id: string; name: string }));
-        case "/list-peers":
-          return Response.json(handleListPeers(body as ListPeersRequest));
-        case "/send-message":
-          return Response.json(handleSendMessage(body as SendMessageRequest));
-        case "/poll-messages":
-          return Response.json(handlePollMessages(body as PollMessagesRequest));
-        case "/unregister":
-          handleUnregister(body as { id: string });
-          return Response.json({ ok: true });
-        default:
-          return Response.json({ error: "not found" }, { status: 404 });
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return Response.json({ error: msg }, { status: 500 });
-    }
-  },
+  fetch: handleRequest,
 });
 
-console.error(`[claude-peers broker] listening on 127.0.0.1:${PORT} (db: ${DB_PATH})`);
+// Unix socket: rides the home bind-mount into docker containers, where the
+// host's TCP loopback is unreachable
+Bun.serve({
+  unix: SOCKET_PATH,
+  fetch: handleRequest,
+});
+
+function cleanupSocket() {
+  try {
+    unlinkSync(SOCKET_PATH);
+  } catch {
+    // Already gone
+  }
+}
+process.on("SIGTERM", () => {
+  cleanupSocket();
+  process.exit(0);
+});
+process.on("SIGINT", () => {
+  cleanupSocket();
+  process.exit(0);
+});
+
+console.error(
+  `[claude-peers broker] listening on 127.0.0.1:${PORT} and ${SOCKET_PATH} (db: ${DB_PATH})`
+);

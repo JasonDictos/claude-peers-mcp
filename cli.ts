@@ -15,27 +15,8 @@
  */
 
 import type { Peer, SendMessageResponse } from "./shared/types.ts";
-
-const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
-const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
-
-async function brokerFetch<T>(path: string, body?: unknown, timeoutMs = 3000): Promise<T> {
-  const opts: RequestInit = body
-    ? {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }
-    : {};
-  const res = await fetch(`${BROKER_URL}${path}`, {
-    ...opts,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) {
-    throw new Error(`${res.status}: ${await res.text()}`);
-  }
-  return res.json() as Promise<T>;
-}
+import { brokerFetch, BROKER_PORT, BROKER_URL } from "./shared/client.ts";
+import { claudeKey, getParentPid } from "./shared/runtime.ts";
 
 function listAllPeers(timeoutMs = 3000): Promise<Peer[]> {
   return brokerFetch<Peer[]>("/list-peers", { scope: "machine", cwd: "/", git_root: null }, timeoutMs);
@@ -47,13 +28,17 @@ function formatPeer(p: Peer): string {
   return parts.join("\n");
 }
 
-/** PIDs of this process's ancestors (nearest first), for claude_pid matching. */
+/** PIDs of this process's ancestors (nearest first). */
 function getAncestorPids(maxDepth = 10): number[] {
   const ancestors: number[] = [];
   let pid = process.pid;
   for (let i = 0; i < maxDepth; i++) {
-    const proc = Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(pid)]);
-    const ppid = parseInt(new TextDecoder().decode(proc.stdout).trim(), 10);
+    let ppid = getParentPid(pid);
+    if (ppid == null) {
+      // No /proc (macOS) — fall back to ps
+      const proc = Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(pid)]);
+      ppid = parseInt(new TextDecoder().decode(proc.stdout).trim(), 10) || null;
+    }
     if (!ppid || ppid <= 1) break;
     ancestors.push(ppid);
     pid = ppid;
@@ -63,13 +48,18 @@ function getAncestorPids(maxDepth = 10): number[] {
 
 /**
  * Find the peer belonging to the Claude Code session this command runs inside.
- * Primary: a peer whose claude_pid is one of our ancestor processes.
+ * Primary: a peer whose claude_key (or legacy claude_pid) matches one of our
+ * ancestor processes — the key includes the process start time, so a
+ * container pid can't collide with an identically-numbered host pid.
  * Fallback: a unique cwd match.
  */
 function findSelf(peers: Peer[], cwd: string): Peer | null {
   const ancestors = getAncestorPids();
   for (const pid of ancestors) {
-    const matches = peers.filter((p) => p.claude_pid === pid);
+    const key = claudeKey(pid);
+    const matches = peers.filter(
+      (p) => p.claude_key === key || (p.claude_key == null && p.claude_pid === pid)
+    );
     if (matches.length > 0) {
       // Several matches = session with subagent MCP connections; the
       // primary (top-level session) is the earliest registration
