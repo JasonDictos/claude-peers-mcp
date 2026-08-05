@@ -72,6 +72,21 @@ function findSelf(peers: Peer[], cwd: string): Peer | null {
   return byCwd.length === 1 ? byCwd[0]! : null;
 }
 
+/**
+ * Message text for send/broadcast: from argv, or from stdin when the args
+ * are empty or "-". Shells eat metachars (&&, |, ;) in unquoted arguments —
+ * piping or heredoc'ing the message avoids the whole quoting problem:
+ *   bun cli.ts send goofy-joe - <<'EOF'
+ *   run make && make install; don't ask
+ *   EOF
+ */
+async function messageFromArgsOrStdin(args: string[]): Promise<string> {
+  const joined = args.join(" ").trim();
+  if (joined && joined !== "-") return joined;
+  const stdin = (await Bun.stdin.text()).trim();
+  return stdin;
+}
+
 function getGitBranch(cwd: string): string | null {
   const proc = Bun.spawnSync(["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"], {
     stderr: "ignore",
@@ -123,9 +138,9 @@ switch (cmd) {
 
   case "send": {
     const target = process.argv[3];
-    const msg = process.argv.slice(4).join(" ");
+    const msg = target ? await messageFromArgsOrStdin(process.argv.slice(4)) : "";
     if (!target || !msg) {
-      console.error("Usage: bun cli.ts send <name|id|path> <message>");
+      console.error("Usage: bun cli.ts send <name|id|path> <message>  (or pipe the message on stdin)");
       process.exit(1);
     }
     try {
@@ -181,9 +196,9 @@ switch (cmd) {
   }
 
   case "broadcast": {
-    const msg = process.argv.slice(3).join(" ");
+    const msg = await messageFromArgsOrStdin(process.argv.slice(3));
     if (!msg) {
-      console.error("Usage: bun cli.ts broadcast <message>");
+      console.error("Usage: bun cli.ts broadcast <message>  (or pipe the message on stdin)");
       process.exit(1);
     }
     try {
