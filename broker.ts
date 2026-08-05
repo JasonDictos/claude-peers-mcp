@@ -26,7 +26,7 @@ import type {
 import { generateName, childName } from "./shared/names.ts";
 import { resolveTarget, sessionKey } from "./shared/resolve.ts";
 import { getRuntimeId } from "./shared/runtime.ts";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, unlinkSync, lstatSync } from "node:fs";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;
@@ -56,8 +56,19 @@ if (
   console.error(`[claude-peers broker] another broker is already running, exiting`);
   process.exit(0);
 }
-// No listener answered — remove a stale socket file so we can bind
-if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH);
+// No listener answered — remove a stale socket file so we can bind. Only
+// ever delete an actual socket: a misconfigured CLAUDE_PEERS_SOCK pointing
+// at a regular file must not cost someone that file.
+if (existsSync(SOCKET_PATH)) {
+  if (lstatSync(SOCKET_PATH).isSocket()) {
+    unlinkSync(SOCKET_PATH);
+  } else {
+    console.error(
+      `[claude-peers broker] ${SOCKET_PATH} exists and is not a socket — refusing to delete it, exiting`
+    );
+    process.exit(1);
+  }
+}
 
 // --- Database setup ---
 
@@ -354,6 +365,10 @@ function handleSetName(body: { id: string; name: string }): {
   const name = (body.name ?? "").trim().toLowerCase().replace(/\s+/g, "-");
   if (!name || name.length > 64) {
     return { ok: false, error: "Name must be 1-64 characters" };
+  }
+  // Names are interpolated into agent-suffix RegExps — keep them regex-inert
+  if (!/^[a-z0-9-]+$/.test(name)) {
+    return { ok: false, error: "Name may only contain letters, digits, and dashes" };
   }
   const peer = db.query("SELECT * FROM peers WHERE id = ?").get(body.id) as Peer | null;
   if (!peer) {

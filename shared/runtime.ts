@@ -26,7 +26,13 @@ function statFields(pid: number): string[] | null {
   }
 }
 
-/** Process start time in clock ticks since boot (stat field 22), or null. */
+/**
+ * Process start time in clock ticks since boot (stat field 22), or null.
+ * Without /proc (macOS) callers fall back to a constant "0" suffix — runtime
+ * and session keys then degrade to plain pid matching, which is fine there:
+ * the cross-namespace collision this guards against is a Linux-container
+ * scenario.
+ */
 export function getStartTime(pid: number): string | null {
   // After (comm): state=f3 ... starttime=f22 -> index 19
   return statFields(pid)?.[19] ?? null;
