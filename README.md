@@ -133,6 +133,7 @@ cd ~/claude-peers-mcp
 bun cli.ts status                # broker status + all peers
 bun cli.ts peers                 # list peers
 bun cli.ts send <target> <msg>   # send a message (target: name, ID, or ~/path)
+bun cli.ts broadcast <msg>       # send a message to every peer (one per session)
 bun cli.ts whoami                # this session's peer name and ID
 bun cli.ts iam <name>            # rename this session's peer
 bun cli.ts statusline            # statusline command (Claude Code JSON on stdin)
@@ -183,7 +184,21 @@ Rename result:
 Confirm the rename to the user in one line (old name -> new name).
 ```
 
-Then `/peer-whoami`, `/peer-list`, and `/peer-iam <name>` work in every session.
+```markdown
+<!-- ~/.claude/commands/peer-broadcast.md -->
+---
+description: Send a message to all claude-peers sessions on this machine
+argument-hint: <message>
+allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
+---
+Broadcast result:
+
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts broadcast $ARGUMENTS`
+
+Confirm who received the broadcast. Subagent peers are skipped — each session gets the message once.
+```
+
+Then `/peer-whoami`, `/peer-list`, `/peer-iam <name>`, and `/peer-broadcast <message>` work in every session.
 
 ## Docker containers
 
