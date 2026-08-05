@@ -8,6 +8,7 @@
  *   bun cli.ts status              — Show broker status and all peers
  *   bun cli.ts peers               — List all peers
  *   bun cli.ts send <target> <msg> — Send a message (target: name, ID, or path)
+ *   bun cli.ts broadcast <msg>     — Send a message to every peer (one per session)
  *   bun cli.ts whoami              — Show this session's peer name and ID
  *   bun cli.ts iam <name>          — Rename this session's peer
  *   bun cli.ts statusline          — Statusline command (reads Claude Code JSON on stdin)
@@ -17,6 +18,7 @@
 import type { Peer, SendMessageResponse } from "./shared/types.ts";
 import { brokerFetch, BROKER_PORT, BROKER_URL } from "./shared/client.ts";
 import { claudeKey, getParentPid } from "./shared/runtime.ts";
+import { sessionKey } from "./shared/resolve.ts";
 
 function listAllPeers(timeoutMs = 3000): Promise<Peer[]> {
   return brokerFetch<Peer[]>("/list-peers", { scope: "machine", cwd: "/", git_root: null }, timeoutMs);
@@ -178,6 +180,51 @@ switch (cmd) {
     break;
   }
 
+  case "broadcast": {
+    const msg = process.argv.slice(3).join(" ");
+    if (!msg) {
+      console.error("Usage: bun cli.ts broadcast <message>");
+      process.exit(1);
+    }
+    try {
+      const peers = await listAllPeers();
+      const self = findSelf(peers, process.cwd());
+      const selfKey = self ? sessionKey(self) : null;
+
+      // One message per session: collapse agent groups to their primary and
+      // skip our own session
+      const seen = new Set<string>();
+      const targets = peers
+        .sort((a, b) => a.registered_at.localeCompare(b.registered_at))
+        .filter((p) => {
+          if (self && (p.id === self.id || (selfKey && sessionKey(p) === selfKey))) return false;
+          const key = sessionKey(p);
+          if (key == null) return true;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+
+      if (targets.length === 0) {
+        console.log("No other peers to broadcast to.");
+        break;
+      }
+      for (const p of targets) {
+        const result = await brokerFetch<SendMessageResponse>("/send-message", {
+          from_id: self?.id ?? "cli",
+          to: p.id,
+          text: msg,
+        });
+        console.log(result.ok ? `-> ${p.name} (${p.cwd})` : `!! ${p.name}: ${result.error}`);
+      }
+      console.log(`Broadcast to ${targets.length} peer(s).`);
+    } catch (e) {
+      console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    }
+    break;
+  }
+
   case "whoami": {
     try {
       const peers = await listAllPeers();
@@ -253,6 +300,7 @@ Usage:
   bun cli.ts status              Show broker status and all peers
   bun cli.ts peers               List all peers
   bun cli.ts send <target> <msg> Send a message (target: name, ID, or ~/path)
+  bun cli.ts broadcast <msg>     Send a message to every peer (one per session)
   bun cli.ts whoami              Show this session's peer name and ID
   bun cli.ts iam <name>          Rename this session's peer
   bun cli.ts statusline          Statusline command (Claude Code JSON on stdin)
