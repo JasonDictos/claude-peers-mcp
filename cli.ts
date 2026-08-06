@@ -295,10 +295,10 @@ switch (cmd) {
     }
 
     let line = `\x1b[36m${short}\x1b[0m`;
-    if (branch) line += ` \x1b[93m(${branch})\x1b[0m`;
+    if (branch) line += ` \x1b[93m${branch}\x1b[0m`;
     if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
-    if (model) line += ` \x1b[90m· ${model}\x1b[0m`;
-    line += inDocker ? ` \x1b[94m[docker]\x1b[0m` : ` \x1b[90m[host]\x1b[0m`;
+    if (model) line += ` \x1b[92m· ${model}\x1b[0m`;
+    line += inDocker ? ` \x1b[94m[docker]\x1b[0m` : ` \x1b[38;5;208m[host]\x1b[0m`;
     process.stdout.write(line);
     break;
   }
