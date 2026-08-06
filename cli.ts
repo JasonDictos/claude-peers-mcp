@@ -260,9 +260,11 @@ switch (cmd) {
     // Reads Claude Code's statusline JSON on stdin. Must be fast and must
     // never fail — degrade to cwd (+ branch) if the broker is unreachable.
     let cwd = process.cwd();
+    let model: string | null = null;
     try {
       const input = JSON.parse(await Bun.stdin.text());
       cwd = input.cwd ?? input.workspace?.current_dir ?? cwd;
+      model = input.model?.display_name ?? null;
     } catch {
       // No/bad stdin — fall back to process cwd
     }
@@ -295,6 +297,7 @@ switch (cmd) {
     let line = `\x1b[36m${short}\x1b[0m`;
     if (branch) line += ` \x1b[93m(${branch})\x1b[0m`;
     if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
+    if (model) line += ` \x1b[90m· ${model}\x1b[0m`;
     line += inDocker ? ` \x1b[94m[docker]\x1b[0m` : ` \x1b[90m[host]\x1b[0m`;
     process.stdout.write(line);
     break;
