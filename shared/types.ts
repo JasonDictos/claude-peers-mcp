@@ -24,6 +24,9 @@ export interface Message {
   id: number;
   from_id: PeerId;
   to_id: PeerId;
+  /** Sender/recipient names at send time (survive peer death, for the log). */
+  from_name: string;
+  to_name: string;
   text: string;
   sent_at: string; // ISO timestamp
   delivered: boolean;

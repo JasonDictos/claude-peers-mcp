@@ -106,6 +106,8 @@ db.run(`
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     from_id TEXT NOT NULL,
     to_id TEXT NOT NULL,
+    from_name TEXT NOT NULL DEFAULT '',
+    to_name TEXT NOT NULL DEFAULT '',
     text TEXT NOT NULL,
     sent_at TEXT NOT NULL,
     delivered INTEGER NOT NULL DEFAULT 0,
@@ -115,17 +117,20 @@ db.run(`
 `);
 
 // Add columns introduced after the first release (the DB may predate them)
-function ensureColumn(colDef: string) {
+function ensureColumn(table: string, colDef: string) {
   try {
-    db.run(`ALTER TABLE peers ADD COLUMN ${colDef}`);
+    db.run(`ALTER TABLE ${table} ADD COLUMN ${colDef}`);
   } catch {
     // Column already exists
   }
 }
-ensureColumn("name TEXT NOT NULL DEFAULT ''");
-ensureColumn("claude_pid INTEGER");
-ensureColumn("claude_key TEXT");
-ensureColumn("runtime TEXT");
+ensureColumn("peers", "name TEXT NOT NULL DEFAULT ''");
+ensureColumn("peers", "claude_pid INTEGER");
+ensureColumn("peers", "claude_key TEXT");
+ensureColumn("peers", "runtime TEXT");
+// Names denormalized onto messages so the log stays readable after peers die
+ensureColumn("messages", "from_name TEXT NOT NULL DEFAULT ''");
+ensureColumn("messages", "to_name TEXT NOT NULL DEFAULT ''");
 
 /**
  * Liveness: pid check (signal 0) when the peer shares our PID namespace,
@@ -266,8 +271,14 @@ const selectAllPeers = db.prepare(`
 `);
 
 const insertMessage = db.prepare(`
-  INSERT INTO messages (from_id, to_id, text, sent_at, delivered)
-  VALUES (?, ?, ?, ?, 0)
+  INSERT INTO messages (from_id, to_id, from_name, to_name, text, sent_at, delivered)
+  VALUES (?, ?, ?, ?, ?, ?, 0)
+`);
+
+const selectRecentMessages = db.prepare(`
+  SELECT * FROM (
+    SELECT * FROM messages WHERE id > ? ORDER BY id DESC LIMIT ?
+  ) ORDER BY id ASC
 `);
 
 const selectUndelivered = db.prepare(`
@@ -464,8 +475,24 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
   }
 
   const peer = resolution.peer;
-  insertMessage.run(body.from_id, peer.id, body.text, new Date().toISOString());
+  const sender = db.query("SELECT name FROM peers WHERE id = ?").get(body.from_id) as
+    | { name: string }
+    | null;
+  insertMessage.run(
+    body.from_id,
+    peer.id,
+    sender?.name ?? body.from_id,
+    peer.name,
+    body.text,
+    new Date().toISOString()
+  );
   return { ok: true, to: { id: peer.id, name: peer.name } };
+}
+
+function handleLog(body: { limit?: number; after_id?: number }): { messages: Message[] } {
+  const limit = Math.min(Math.max(body.limit ?? 50, 1), 500);
+  const messages = selectRecentMessages.all(body.after_id ?? 0, limit) as Message[];
+  return { messages };
 }
 
 function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse | null {
@@ -530,6 +557,8 @@ async function handleRequest(req: Request): Promise<Response> {
         }
         return Response.json(result);
       }
+      case "/log":
+        return Response.json(handleLog(body as { limit?: number; after_id?: number }));
       case "/unregister":
         handleUnregister(body as { id: string });
         return Response.json({ ok: true });
