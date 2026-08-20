@@ -12,6 +12,8 @@ export interface Peer {
   claude_key: string | null;
   /** PID-namespace identity (host or container) this peer runs in. */
   runtime: string | null;
+  /** Machine hostname — peers can live on different machines. */
+  host: string | null;
   cwd: string;
   git_root: string | null;
   tty: string | null;
@@ -39,6 +41,7 @@ export interface RegisterRequest {
   claude_pid: number | null;
   claude_key?: string | null;
   runtime?: string | null;
+  host?: string | null;
   cwd: string;
   git_root: string | null;
   tty: string | null;

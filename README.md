@@ -131,13 +131,14 @@ You can also inspect and interact from the command line:
 cd ~/claude-peers-mcp
 
 bun cli.ts status                # broker status + all peers
-bun cli.ts peers                 # list peers
+bun cli.ts peers [host]          # list peers (optionally one machine)
 bun cli.ts send <target> <msg>   # send a message (target: name, ID, or ~/path)
 bun cli.ts broadcast <msg>       # send a message to every peer (one per session)
 bun cli.ts whoami                # this session's peer name and ID
 bun cli.ts iam <name>            # rename this session's peer
 bun cli.ts statusline            # statusline command (Claude Code JSON on stdin)
 bun cli.ts log [-n N] [-f]       # message history, full text (-f follows, tail-style)
+bun cli.ts network-setup         # cross-machine peering (--show, --client <host> --token <t>)
 bun cli.ts kill-broker           # stop the broker
 ```
 
@@ -209,6 +210,8 @@ PEER_MSG_EOF`
 Confirm who received the broadcast. Subagent peers are skipped — each session gets the message once.
 ```
 
+The terminal shows an inbound message as a single truncated line (`← claude-peers: witty-hazel: ...`), which no channel can widen. To read messages in full as they arrive, have Claude run `cli.ts log -f` as a background task — the live feed is then one **ctrl-b** away for the rest of the session.
+
 A `/peer-log [count]` command following the same pattern (`cli.ts log -n $ARGUMENTS`) shows recent messages with sender names and full text — useful because the terminal's one-line `← claude-peers: ...` preview truncates. For a live feed, run `cli.ts log -f` as a background task and view it with ctrl-b.
 
 Then `/peer-whoami`, `/peer-list`, `/peer-iam <name>`, `/peer-broadcast <message>`, and `/peer-log` work in every session.
@@ -226,12 +229,51 @@ Sessions inside a docker container can join the same peer network as the host, p
 
 - Liveness and agent grouping are PID-namespace-aware: container peers are judged by heartbeat freshness (a container pid means nothing to the host broker), and session grouping keys include the process start time so pid numbers can't collide across namespaces. A peer wrongly pruned (e.g. after a laptop suspend) re-registers automatically and gets its sticky name back.
 
+## Multiple machines
+
+Peers on different machines join one network: a single **hub** broker holds the peer list, and other machines' sessions connect to it over TCP.
+
+On the machine that hosts the broker:
+
+```bash
+bun cli.ts network-setup          # generates a token, switches the bind to 0.0.0.0
+bun cli.ts kill-broker && bun broker.ts &   # restart to pick up the new bind
+```
+
+It prints a ready-made command per address it found — hostname first, then routable IPs. Run the one the other machine can reach:
+
+```bash
+bun cli.ts network-setup --client jason-desktop --token <token>   # or --client 10.1.1.4
+```
+
+The client checks that the name resolves and that the broker answers, then writes `~/.claude-peers.json`. Restart Claude Code sessions there and they register on the shared network. `network-setup --show` prints the current role, bind, and token.
+
+**Auth is mandatory for network binds.** The broker refuses to start on a non-loopback address without a token, because anything that can POST to it can inject text into every session on the network. Loopback and unix-socket callers stay trusted, so local and container peers are unaffected. Traffic is plain HTTP with a bearer token — fine for a LAN or VPN (this uses Tailscale/WireGuard addresses happily); don't expose the port to the internet.
+
+**Addressing across machines.** Names are globally unique — the hub issues every one — so a name is a complete address with no host qualifier, and `list_peers` shows `name@host` only as information. Directories *do* repeat across machines, so paths can be qualified:
+
+```
+archiver:~/archiver-tools    # that path on that machine
+archiver:                    # that machine's session
+~/archiver-tools             # ambiguous if both machines have one -> returns candidates
+```
+
+Host names match on short name, FQDN, or IP: a peer registered as `archiver.lan` answers to `archiver:`. `bun cli.ts peers archiver` (or `/peer-list archiver`) lists just that machine.
+
+**Dev containers on any machine** need no extra wiring: a container that bind-mounts the host home (the `run_as`/`dev.sh` pattern, running as `dev_<user>`) is found automatically — claude-peers resolves the host home from the symlinked `~/.claude` and reads the config and socket from there. A container registers under its own hostname (`archiverdev`), so address it as `archiverdev:` or, as always, by peer name.
+
+Remote peers are judged alive by heartbeat rather than by PID, since a PID from another machine means nothing locally — and session grouping, re-registration, and sticky names are all scoped per host, so two machines that happen to share a PID or a directory never clobber each other.
+
 ## Configuration
 
 | Environment variable | Default                | Description                                  |
 | -------------------- | ---------------------- | -------------------------------------------- |
 | `CLAUDE_PEERS_PORT`  | `7899`                 | Broker TCP port                              |
 | `CLAUDE_PEERS_SOCK`  | `~/.claude-peers.sock` | Broker unix socket (works across bind mounts) |
+| `CLAUDE_PEERS_BROKER` | —                     | Remote broker URL (this machine is a client)  |
+| `CLAUDE_PEERS_TOKEN` | —                      | Shared secret for network peers               |
+| `CLAUDE_PEERS_BIND`  | `127.0.0.1`            | Broker listen address (non-loopback needs a token) |
+| `CLAUDE_PEERS_CONFIG` | `~/.claude-peers.json` | Where the above three persist (env wins)     |
 | `CLAUDE_PEERS_DB`    | `~/.claude-peers.db`   | SQLite database path                         |
 | `OPENAI_API_KEY`     | —                      | Enables auto-summary via gpt-5.4-nano        |
 

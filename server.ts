@@ -32,8 +32,9 @@ import {
   getGitBranch,
   getRecentFiles,
 } from "./shared/summarize.ts";
-import { brokerFetch } from "./shared/client.ts";
-import { claudeKey, getRuntimeId, getParentPid } from "./shared/runtime.ts";
+import { brokerFetch, IS_REMOTE, BROKER_URL } from "./shared/client.ts";
+import { claudeKey, getRuntimeId, getParentPid, channelEnabled } from "./shared/runtime.ts";
+import { hostname } from "node:os";
 
 // --- Configuration ---
 
@@ -54,8 +55,14 @@ async function isBrokerAlive(): Promise<boolean> {
 
 async function ensureBroker(): Promise<void> {
   if (await isBrokerAlive()) {
-    log("Broker already running");
+    log(IS_REMOTE ? `Using remote broker ${BROKER_URL}` : "Broker already running");
     return;
+  }
+
+  // A remote broker is someone else's to run — never spawn a local one that
+  // would silently split the network in two.
+  if (IS_REMOTE) {
+    throw new Error(`Remote broker ${BROKER_URL} is unreachable (check host, port, token)`);
   }
 
   log("Starting broker daemon...");
@@ -129,6 +136,8 @@ let mySummary = "";
 let myCwd = process.cwd();
 let myGitRoot: string | null = null;
 let myTty: string | null = null;
+/** True when Claude Code would drop anything we push (no channel listener). */
+let pushDisabled = false;
 
 async function register(): Promise<void> {
   const reg = await brokerFetch<RegisterResponse>("/register", {
@@ -136,6 +145,7 @@ async function register(): Promise<void> {
     claude_pid: process.ppid || null,
     claude_key: process.ppid ? claudeKey(process.ppid) : null,
     runtime: getRuntimeId(),
+    host: hostname(),
     cwd: myCwd,
     git_root: myGitRoot,
     tty: myTty,
@@ -166,6 +176,8 @@ const mcp = new Server(
 Every peer has a human-readable name (like "goofy-joe") and an 8-char ID — the two are interchangeable as addresses. You can also address a peer by its directory path (e.g. "~/archiver-tools"): the broker matches it against each peer's working directory and git repo. If a path matches several peers, the send fails and returns the candidates so you can pick one by name.
 
 A session running subagents appears as a group: the top-level session keeps the base name (goofy-joe) and its agents are suffixed (goofy-joe-1, goofy-joe-2). Path addressing resolves to the top-level session; use a suffixed name to reach a specific agent.
+
+Peers may live on different machines. list_peers reports each peer's Host, and a sender on another machine shows as name@host. Since the same directory can exist on several machines, qualify a path with the host when needed: "archiver:~/archiver-tools", or "archiver:" for that machine's session. A bare path that matches peers on multiple machines returns them as candidates.
 
 IMPORTANT: When you receive a <channel source="claude-peers" ...> message, RESPOND IMMEDIATELY. Do not wait until your current task is finished. Pause what you are doing, reply to the message using send_message, then resume your work. Treat incoming peer messages like a coworker tapping you on the shoulder — answer right away, even if you're in the middle of something.
 
@@ -292,6 +304,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           const parts = [
             `Name: ${p.name}`,
             `ID: ${p.id}`,
+            `Host: ${p.host ?? hostname()}`,
             `PID: ${p.pid}`,
             `CWD: ${p.cwd}`,
           ];
@@ -427,10 +440,28 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       const parts = [
         `Name: ${myName ?? "(not assigned yet — broker unreachable)"}`,
         `ID: ${myId}`,
+        `Host: ${hostname()}`,
         `CWD: ${myCwd}`,
       ];
       if (myGitRoot) parts.push(`Repo: ${myGitRoot}`);
       if (mySummary) parts.push(`Summary: ${mySummary}`);
+      // Without the channel flag, Claude Code drops anything we push: this
+      // session can send, but peers' replies will never arrive on their own.
+      if (pushDisabled) {
+        let pending = 0;
+        try {
+          pending = (await brokerFetch<{ count: number }>("/pending", { id: myId })).count;
+        } catch {
+          // Broker unreachable — report the condition without a count
+        }
+        parts.push(
+          `Channel push: DISABLED — this session was not started with ` +
+            `"--dangerously-load-development-channels server:claude-peers", so peer messages ` +
+            `cannot arrive on their own. They are held for you: ${pending} waiting now — call ` +
+            `check_messages to read them, and tell the user to relaunch with that flag for ` +
+            `live delivery.`
+        );
+      }
       return {
         content: [{ type: "text" as const, text: parts.join("\n") }],
       };
@@ -484,12 +515,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 async function pollAndPushMessages() {
   if (!myId) return;
 
+  // If this session never loaded claude-peers as a channel, Claude Code
+  // discards whatever we push. Polling would consume the messages on their
+  // way into that void, so leave them queued instead: they stay visible in
+  // `cli.ts log`, counted by /pending (statusline), and retrievable whenever
+  // Claude calls check_messages.
+  if (pushDisabled) return;
+
   try {
     const result = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: myId });
 
     for (const msg of result.messages) {
       // Look up the sender's info for context
       let fromName = "";
+      let fromHost = "";
       let fromSummary = "";
       let fromCwd = "";
       try {
@@ -503,6 +542,11 @@ async function pollAndPushMessages() {
           fromName = sender.name;
           fromSummary = sender.summary;
           fromCwd = sender.cwd;
+          // Qualify the name when the sender is on another machine, so the
+          // preview line says where it came from
+          if (sender.host && sender.host !== hostname()) {
+            fromHost = sender.host;
+          }
         }
       } catch {
         // Non-critical, proceed without sender info
@@ -512,7 +556,8 @@ async function pollAndPushMessages() {
       // The sender name is prefixed into the content because the terminal's
       // one-line preview ("← claude-peers: ...") renders only the content —
       // meta attributes are invisible there.
-      const senderLabel = fromName || msg.from_name || msg.from_id;
+      const baseLabel = fromName || msg.from_name || msg.from_id;
+      const senderLabel = fromHost ? `${baseLabel}@${fromHost}` : baseLabel;
       await mcp.notification({
         method: "notifications/claude/channel",
         params: {
@@ -520,6 +565,7 @@ async function pollAndPushMessages() {
           meta: {
             from_id: msg.from_id,
             from_name: fromName,
+            from_host: fromHost,
             from_summary: fromSummary,
             from_cwd: fromCwd,
             sent_at: msg.sent_at,
@@ -587,6 +633,15 @@ async function main() {
   myTty = tty;
   mySummary = initialSummary;
   await register();
+
+  pushDisabled = !!process.ppid && channelEnabled(process.ppid) === false;
+  if (pushDisabled) {
+    log(
+      `WARNING: session not started with --dangerously-load-development-channels ` +
+        `server:claude-peers — inbound messages cannot be pushed, so they are left ` +
+        `queued for check_messages instead of being consumed and lost`
+    );
+  }
 
   // If summary generation is still running, update it when done
   if (!initialSummary) {

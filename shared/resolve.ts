@@ -5,6 +5,7 @@
  */
 
 import type { Peer } from "./types.ts";
+import { hostMatches } from "./hosts.ts";
 
 export type Resolution =
   | { kind: "match"; peer: Peer }
@@ -30,14 +31,26 @@ function looksLikePath(target: string): boolean {
 }
 
 /**
- * Session grouping key. Prefers the namespace-safe claude_key (pid + start
- * time); falls back to the bare claude_pid for peers registered before
- * claude_key existed. Null = ungroupable standalone peer.
+ * Session grouping key: machine + process. Prefers the namespace-safe
+ * claude_key (pid + start time), falling back to the bare claude_pid for
+ * peers registered before claude_key existed. The host is part of the key
+ * because pid numbers — and even pid+starttime — can coincide on two
+ * machines, and merging those would swallow one machine's peer. Null =
+ * ungroupable standalone peer.
  */
-export function sessionKey(p: Peer): string | null {
-  if (p.claude_key) return p.claude_key;
-  if (p.claude_pid != null) return `pid:${p.claude_pid}`;
+export function sessionKeyOf(
+  host: string | null,
+  claudeKey: string | null,
+  claudePid: number | null
+): string | null {
+  const scope = host ?? "local";
+  if (claudeKey) return `${scope}/${claudeKey}`;
+  if (claudePid != null) return `${scope}/pid:${claudePid}`;
   return null;
+}
+
+export function sessionKey(p: Peer): string | null {
+  return sessionKeyOf(p.host, p.claude_key, p.claude_pid);
 }
 
 /**
@@ -66,6 +79,26 @@ function collapseAgentGroups(matches: Peer[]): Peer[] {
 }
 
 export function resolveTarget(peers: Peer[], target: string, home: string): Resolution {
+  // 0. Host-qualified ("archiver:~/tools", "archiver:goofy-joe", "archiver:").
+  //    The same directory exists on several machines, so the host prefix is
+  //    how you disambiguate. Only treated as a host if a peer actually lives
+  //    there — otherwise it falls through as a plain target.
+  const colon = target.indexOf(":");
+  if (colon > 0) {
+    const host = target.slice(0, colon);
+    const rest = target.slice(colon + 1);
+    const onHost = peers.filter((p) => hostMatches(p.host, host));
+    if (onHost.length > 0) {
+      if (!rest) {
+        // Bare "archiver:" means that machine's session
+        const matches = collapseAgentGroups(onHost);
+        if (matches.length === 1) return { kind: "match", peer: matches[0]! };
+        return { kind: "ambiguous", candidates: matches };
+      }
+      return resolveTarget(onHost, rest, home);
+    }
+  }
+
   // 1. Exact ID
   const byId = peers.find((p) => p.id === target);
   if (byId) return { kind: "match", peer: byId };
@@ -74,6 +107,18 @@ export function resolveTarget(peers: Peer[], target: string, home: string): Reso
   const lower = target.toLowerCase();
   const byName = peers.find((p) => p.name && p.name.toLowerCase() === lower);
   if (byName) return { kind: "match", peer: byName };
+
+  // 2b. The display form, "name@host". Listings and inbound messages show
+  //     peers that way, so it has to be accepted as input too — otherwise you
+  //     copy what you see and get "no peer matches".
+  const at = target.lastIndexOf("@");
+  if (at > 0) {
+    const onHost = peers.filter((p) => hostMatches(p.host, target.slice(at + 1)));
+    if (onHost.length > 0) {
+      const inner = resolveTarget(onHost, target.slice(0, at), home);
+      if (inner.kind !== "none") return inner;
+    }
+  }
 
   // 3. Path
   if (looksLikePath(target)) {

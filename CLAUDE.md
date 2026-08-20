@@ -10,11 +10,14 @@ Peer discovery and messaging MCP channel for Claude Code instances.
 
 ## Architecture
 
-- `broker.ts` — Singleton HTTP daemon on localhost:7899 + SQLite. Auto-launched by the MCP server. Assigns each peer a unique human-readable name (`goofy-joe`) and resolves message targets (ID, name, or directory path).
+- `broker.ts` — Singleton HTTP daemon (unix socket + TCP; `CLAUDE_PEERS_BIND` opens it to other machines, which requires a token) + SQLite. Auto-launched by the MCP server. Assigns each peer a unique human-readable name (`goofy-joe`) and resolves message targets (ID, name, or directory path).
 - `server.ts` — MCP stdio server, one per Claude Code instance. Connects to broker, exposes tools, pushes channel notifications.
 - `shared/types.ts` — Shared TypeScript types for broker API.
 - `shared/names.ts` — Adjective-noun name generation.
-- `shared/resolve.ts` — Pure target-resolution logic (ID → name → path, with ambiguity reporting).
+- `shared/resolve.ts` — Pure target-resolution logic (host prefix → ID → name → path, with ambiguity reporting).
+- `shared/config.ts` — Network config (broker URL, token, bind) from env or `~/.claude-peers.json`.
+- `shared/hosts.ts` — Hostname matching (short/FQDN/IP), DNS resolution, local address discovery.
+- `shared/client.ts` — Broker transport: remote URL → unix socket → localhost TCP.
 - `shared/summarize.ts` — Auto-summary generation via gpt-5.4-nano.
 - `cli.ts` — CLI utility for inspecting broker state. Also provides `whoami` and `statusline` (identifies the calling session by walking ancestor PIDs to match the peer's `claude_pid`).
 
@@ -29,13 +32,18 @@ claude --dangerously-load-development-channels server:claude-peers
 
 # CLI:
 bun cli.ts status
-bun cli.ts peers
+bun cli.ts peers [hostname]
 bun cli.ts send <name|id|path> <message>
 bun cli.ts whoami
 bun cli.ts iam <name>   # rename this session's peer
 bun cli.ts statusline   # for statusLine in ~/.claude/settings.json
+bun cli.ts log -f          # full message text; run as a background task for ctrl-b
+bun cli.ts network-setup   # cross-machine peering (hub) / --client <host> --token <t>
 bun cli.ts kill-broker
 ```
+
+Peer names are globally unique across all machines (the hub broker issues them), so a
+name is a complete address. Only paths need host qualification: `archiver:~/tools`.
 
 ## Bun
 
