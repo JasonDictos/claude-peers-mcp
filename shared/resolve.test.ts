@@ -16,6 +16,7 @@ function peer(overrides: Partial<Peer> & { id: string }): Peer {
     claude_key: null,
     runtime: null,
     host: null,
+    push_enabled: null,
     summary: "",
     registered_at: "2026-08-04T00:00:00Z",
     last_seen: "2026-08-04T00:00:00Z",

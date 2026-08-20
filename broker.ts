@@ -174,6 +174,7 @@ ensureColumn("peers", "claude_pid INTEGER");
 ensureColumn("peers", "claude_key TEXT");
 ensureColumn("peers", "runtime TEXT");
 ensureColumn("peers", "host TEXT");
+ensureColumn("peers", "push_enabled INTEGER");
 
 // Peer names are globally unique across every machine on the network — one
 // broker hands them out, and a name alone is a complete address (no host
@@ -339,8 +340,8 @@ seedNameBindings();
 // --- Prepared statements ---
 
 const insertPeer = db.prepare(`
-  INSERT INTO peers (id, name, pid, claude_pid, claude_key, runtime, host, cwd, git_root, tty, summary, registered_at, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO peers (id, name, pid, claude_pid, claude_key, runtime, host, push_enabled, cwd, git_root, tty, summary, registered_at, last_seen)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateLastSeen = db.prepare(`
@@ -455,6 +456,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     body.claude_key ?? null,
     body.runtime ?? null,
     host,
+    body.push_enabled === undefined ? null : body.push_enabled ? 1 : 0,
     body.cwd,
     body.git_root,
     body.tty,
@@ -636,6 +638,10 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
   }
 
   const peer = resolution.peer;
+  // A live recipient that never loaded the channel can't be shown the
+  // message — it waits for check_messages. Tell the sender, rather than
+  // reporting a delivery that will not surface.
+  const noPush = peer.push_enabled === 0;
   insertMessage.run(
     body.from_id,
     peer.id,

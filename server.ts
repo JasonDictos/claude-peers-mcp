@@ -140,12 +140,16 @@ let myTty: string | null = null;
 let pushDisabled = false;
 
 async function register(): Promise<void> {
+  // Recomputed here (not just at startup) so a re-register after a broker
+  // restart still reports this session's true capability
+  pushDisabled = !!process.ppid && channelEnabled(process.ppid) === false;
   const reg = await brokerFetch<RegisterResponse>("/register", {
     pid: process.pid,
     claude_pid: process.ppid || null,
     claude_key: process.ppid ? claudeKey(process.ppid) : null,
     runtime: getRuntimeId(),
     host: hostname(),
+    push_enabled: !pushDisabled,
     cwd: myCwd,
     git_root: myGitRoot,
     tty: myTty,
@@ -377,7 +381,12 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
               text: result.queued_offline
                 ? `No live session for "${target}" right now — message queued for ${result.to?.name}. ` +
                   `It is delivered when that session next starts (held for 7 days).`
-                : `Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`,
+                : result.recipient_no_push
+                  ? `Queued for ${result.to?.name}, but that session did not load claude-peers as a ` +
+                    `channel, so it will NOT see this until it runs check_messages. Do not expect a ` +
+                    `reply; if it matters, tell the user to relaunch that session with ` +
+                    `"--dangerously-load-development-channels server:claude-peers".`
+                  : `Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`,
             },
           ],
         };
@@ -637,7 +646,6 @@ async function main() {
   mySummary = initialSummary;
   await register();
 
-  pushDisabled = !!process.ppid && channelEnabled(process.ppid) === false;
   if (pushDisabled) {
     log(
       `WARNING: session not started with --dangerously-load-development-channels ` +

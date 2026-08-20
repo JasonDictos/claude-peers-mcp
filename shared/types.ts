@@ -14,6 +14,11 @@ export interface Peer {
   runtime: string | null;
   /** Machine hostname — peers can live on different machines. */
   host: string | null;
+  /**
+   * 0 when the session did not load claude-peers as a channel: it can send,
+   * but Claude Code has no listener, so messages wait for check_messages.
+   */
+  push_enabled: number | null;
   cwd: string;
   git_root: string | null;
   tty: string | null;
@@ -42,6 +47,7 @@ export interface RegisterRequest {
   claude_key?: string | null;
   runtime?: string | null;
   host?: string | null;
+  push_enabled?: boolean;
   cwd: string;
   git_root: string | null;
   tty: string | null;
@@ -84,6 +90,11 @@ export interface SendMessageResponse {
   error?: string;
   /** True when no live session matched: held for that mailbox until it returns. */
   queued_offline?: boolean;
+  /**
+   * True when the recipient is live but cannot display pushed messages (no
+   * channel listener): it is queued until that session reads it.
+   */
+  recipient_no_push?: boolean;
   /** Resolved recipient on success. */
   to?: { id: PeerId; name: string };
   /** On ambiguous/no-match errors: peers the sender could target instead. */
