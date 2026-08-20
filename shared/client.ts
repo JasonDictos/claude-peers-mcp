@@ -13,14 +13,20 @@
  */
 
 import { existsSync } from "node:fs";
-import { loadConfig } from "./config.ts";
+import { loadConfig, hostHome, firstExisting } from "./config.ts";
 
 const config = loadConfig();
 
 export const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 export const BROKER_URL = config.broker ?? `http://127.0.0.1:${BROKER_PORT}`;
+// In a dev container the socket lives in the bind-mounted host home, not in
+// the container user's own $HOME
 export const SOCKET_PATH =
-  process.env.CLAUDE_PEERS_SOCK ?? `${process.env.HOME}/.claude-peers.sock`;
+  process.env.CLAUDE_PEERS_SOCK ??
+  firstExisting(
+    [`${process.env.HOME}/.claude-peers.sock`, hostHome() && `${hostHome()}/.claude-peers.sock`]
+      .filter(Boolean) as string[]
+  );
 /** True when this machine talks to a broker hosted elsewhere. */
 export const IS_REMOTE = config.broker !== null;
 

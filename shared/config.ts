@@ -9,7 +9,51 @@
  *   { "broker": "http://jason-desktop:7899", "token": "…", "bind": "0.0.0.0" }
  */
 
-import { existsSync, readFileSync, writeFileSync, chmodSync } from "node:fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  chmodSync,
+  lstatSync,
+  realpathSync,
+} from "node:fs";
+import { dirname } from "node:path";
+
+/**
+ * The real user home when running inside a dev container.
+ *
+ * Dev containers (the een-ports `run_as` pattern) run as `dev_<user>` with
+ * the host home bind-mounted at `/home/<user>`, and symlink `~/.claude` into
+ * it. Both the network config and the broker socket live in the host home, so
+ * a session inside a container has to look there — otherwise it finds no
+ * config, falls back to localhost, and silently sees an empty network.
+ */
+export function hostHome(): string | null {
+  const home = process.env.HOME;
+  if (!home) return null;
+
+  // A symlinked ~/.claude points straight at the host home
+  try {
+    const claudeDir = `${home}/.claude`;
+    if (lstatSync(claudeDir).isSymbolicLink()) {
+      const parent = dirname(realpathSync(claudeDir));
+      if (parent && parent !== home) return parent;
+    }
+  } catch {
+    // No ~/.claude, or unreadable — try the naming convention instead
+  }
+
+  // run_as names the container user dev_<user>: /home/dev_jason -> /home/jason
+  const m = home.match(/^(.*)\/dev_([^/]+)$/);
+  if (m && existsSync(`${m[1]}/${m[2]}`)) return `${m[1]}/${m[2]}`;
+
+  return null;
+}
+
+/** First path that exists, else the first candidate (the write target). */
+export function firstExisting(candidates: string[]): string {
+  return candidates.find((p) => existsSync(p)) ?? candidates[0]!;
+}
 
 export interface PeersConfig {
   /** Remote broker URL. Unset = this machine hosts the broker. */
@@ -21,7 +65,11 @@ export interface PeersConfig {
 }
 
 export const CONFIG_PATH =
-  process.env.CLAUDE_PEERS_CONFIG ?? `${process.env.HOME}/.claude-peers.json`;
+  process.env.CLAUDE_PEERS_CONFIG ??
+  firstExisting(
+    [`${process.env.HOME}/.claude-peers.json`, hostHome() && `${hostHome()}/.claude-peers.json`]
+      .filter(Boolean) as string[]
+  );
 
 function readConfigFile(): Partial<PeersConfig> {
   try {
