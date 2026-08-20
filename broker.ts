@@ -24,18 +24,33 @@ import type {
   Message,
 } from "./shared/types.ts";
 import { generateName, childName } from "./shared/names.ts";
-import { resolveTarget, sessionKey } from "./shared/resolve.ts";
+import { resolveTarget, sessionKey, sessionKeyOf } from "./shared/resolve.ts";
 import { getRuntimeId } from "./shared/runtime.ts";
+import { loadConfig, isLoopbackBind, isLoopbackAddress } from "./shared/config.ts";
 import { existsSync, unlinkSync, lstatSync } from "node:fs";
+import { hostname } from "node:os";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;
 const SOCKET_PATH = process.env.CLAUDE_PEERS_SOCK ?? `${process.env.HOME}/.claude-peers.sock`;
+const MY_HOST = hostname();
 
 // This broker's PID namespace. Peers registered from another runtime (e.g. a
 // docker container) can't be liveness-checked via pid — heartbeats rule there.
 const MY_RUNTIME = getRuntimeId();
 const HEARTBEAT_STALE_MS = 60_000;
+
+// Network mode: peers on other machines reach this broker over TCP. The API
+// injects text into Claude sessions, so a network-facing bind MUST carry a
+// shared token — refuse to start rather than expose an open injection point.
+const { bind: BIND, token: TOKEN } = loadConfig();
+if (!isLoopbackBind(BIND) && !TOKEN) {
+  console.error(
+    `[claude-peers broker] refusing to bind ${BIND} without a token.\n` +
+      `  Run: bun cli.ts network-setup   (generates a token and prints remote config)`
+  );
+  process.exit(1);
+}
 
 // Refuse to double-start: SO_REUSEPORT on Linux would let two brokers share
 // the port and load-balance requests between them (old + new code at once).
@@ -92,14 +107,43 @@ db.run(`
 `);
 
 // Sticky names: remembers which name belongs to which directory so a
-// relaunched session gets its old name back
+// relaunched session gets its old name back. Keyed by (host, cwd) — the same
+// path on two machines is two different sessions.
 db.run(`
   CREATE TABLE IF NOT EXISTS name_bindings (
-    cwd TEXT PRIMARY KEY,
+    host TEXT NOT NULL,
+    cwd TEXT NOT NULL,
     name TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (host, cwd)
   )
 `);
+
+// Migrate a pre-network bindings table (PRIMARY KEY was cwd alone): SQLite
+// can't alter a primary key, so rebuild and attribute existing rows to this
+// machine.
+{
+  const cols = db.query("PRAGMA table_info(name_bindings)").all() as { name: string }[];
+  if (!cols.some((c) => c.name === "host")) {
+    db.run(`
+      CREATE TABLE name_bindings_new (
+        host TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        name TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (host, cwd)
+      )
+    `);
+    db.run(
+      `INSERT INTO name_bindings_new (host, cwd, name, updated_at)
+       SELECT ?, cwd, name, updated_at FROM name_bindings`,
+      [MY_HOST]
+    );
+    db.run("DROP TABLE name_bindings");
+    db.run("ALTER TABLE name_bindings_new RENAME TO name_bindings");
+    console.error(`[claude-peers broker] migrated name bindings to (host, cwd)`);
+  }
+}
 
 db.run(`
   CREATE TABLE IF NOT EXISTS messages (
@@ -128,6 +172,20 @@ ensureColumn("peers", "name TEXT NOT NULL DEFAULT ''");
 ensureColumn("peers", "claude_pid INTEGER");
 ensureColumn("peers", "claude_key TEXT");
 ensureColumn("peers", "runtime TEXT");
+ensureColumn("peers", "host TEXT");
+
+// Peer names are globally unique across every machine on the network — one
+// broker hands them out, and a name alone is a complete address (no host
+// qualifier needed). Enforced here so any regression fails loudly instead of
+// silently making a name ambiguous. Unnamed legacy rows are exempt; they get
+// names below.
+try {
+  db.run("CREATE UNIQUE INDEX IF NOT EXISTS idx_peers_name ON peers(name) WHERE name != ''");
+} catch {
+  // Pre-existing duplicates (from a much older build) — named rows get
+  // deduped by normalizeAgentNames/nameUnnamedPeers below; skip the index
+  // rather than refusing to start.
+}
 // Names denormalized onto messages so the log stays readable after peers die
 ensureColumn("messages", "from_name TEXT NOT NULL DEFAULT ''");
 ensureColumn("messages", "to_name TEXT NOT NULL DEFAULT ''");
@@ -139,7 +197,9 @@ ensureColumn("messages", "to_name TEXT NOT NULL DEFAULT ''");
  * Legacy rows without a runtime are treated as local.
  */
 function isPeerAlive(p: Peer): boolean {
-  if (p.runtime && p.runtime !== MY_RUNTIME) {
+  // Another machine or another PID namespace: its pid means nothing here (it
+  // may even belong to an unrelated local process), so trust heartbeats only.
+  if ((p.host && p.host !== MY_HOST) || (p.runtime && p.runtime !== MY_RUNTIME)) {
     return Date.now() - Date.parse(p.last_seen) < HEARTBEAT_STALE_MS;
   }
   try {
@@ -179,12 +239,17 @@ function takenNames(): Set<string> {
   return new Set(rows.map((r) => r.name));
 }
 
-function bindName(cwd: string, name: string) {
+function bindName(host: string, cwd: string, name: string) {
   db.run(
-    `INSERT INTO name_bindings (cwd, name, updated_at) VALUES (?, ?, ?)
-     ON CONFLICT(cwd) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
-    [cwd, name, new Date().toISOString()]
+    `INSERT INTO name_bindings (host, cwd, name, updated_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT(host, cwd) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
+    [host, cwd, name, new Date().toISOString()]
   );
+}
+
+/** Legacy rows predate the host column; they were all local. */
+function peerHost(p: Peer | { host: string | null }): string {
+  return p.host ?? MY_HOST;
 }
 
 /** True if no other live peer of the same session registered earlier. */
@@ -239,8 +304,8 @@ function seedNameBindings() {
     .sort((a, b) => a.registered_at.localeCompare(b.registered_at));
   for (const p of primaries) {
     db.run(
-      "INSERT OR IGNORE INTO name_bindings (cwd, name, updated_at) VALUES (?, ?, ?)",
-      [p.cwd, p.name, new Date().toISOString()]
+      "INSERT OR IGNORE INTO name_bindings (host, cwd, name, updated_at) VALUES (?, ?, ?, ?)",
+      [peerHost(p), p.cwd, p.name, new Date().toISOString()]
     );
   }
 }
@@ -250,8 +315,8 @@ seedNameBindings();
 // --- Prepared statements ---
 
 const insertPeer = db.prepare(`
-  INSERT INTO peers (id, name, pid, claude_pid, claude_key, runtime, cwd, git_root, tty, summary, registered_at, last_seen)
-  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  INSERT INTO peers (id, name, pid, claude_pid, claude_key, runtime, host, cwd, git_root, tty, summary, registered_at, last_seen)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 const updateLastSeen = db.prepare(`
@@ -306,8 +371,14 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   const id = generateId();
   const now = new Date().toISOString();
 
-  // Remove any existing registration for this PID (re-registration)
-  const existing = db.query("SELECT id FROM peers WHERE pid = ?").get(body.pid) as { id: string } | null;
+  const host = body.host ?? MY_HOST;
+
+  // Remove any existing registration for this PID (re-registration). Scoped
+  // to the host: pid numbers collide across machines, and dropping another
+  // machine's peer because it shares a pid would silently unregister it.
+  const existing = db
+    .query("SELECT id FROM peers WHERE pid = ? AND COALESCE(host, ?) = ?")
+    .get(body.pid, MY_HOST, host) as { id: string } | null;
   if (existing) {
     deletePeer.run(existing.id);
   }
@@ -318,8 +389,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
   // Extra registrations from the same Claude process are subagent MCP
   // connections — name them as suffixed children of the session's primary
   let name: string;
-  const myKey =
-    body.claude_key ?? (body.claude_pid != null ? `pid:${body.claude_pid}` : null);
+  const myKey = sessionKeyOf(host, body.claude_key ?? null, body.claude_pid ?? null);
   const siblings = myKey ? live.filter((p) => sessionKey(p) === myKey) : [];
   if (siblings.length > 0) {
     const primary = siblings.reduce((a, b) => (a.registered_at <= b.registered_at ? a : b));
@@ -328,13 +398,13 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     // Sticky names: a relaunched session in a known directory gets its old
     // name back, unless another live peer holds it (second session there)
     const bound = db
-      .query("SELECT name FROM name_bindings WHERE cwd = ?")
-      .get(body.cwd) as { name: string } | null;
+      .query("SELECT name FROM name_bindings WHERE host = ? AND cwd = ?")
+      .get(host, body.cwd) as { name: string } | null;
     if (bound && !taken.has(bound.name)) {
       name = bound.name;
     } else {
       name = generateName(taken);
-      if (!bound) bindName(body.cwd, name);
+      if (!bound) bindName(host, body.cwd, name);
     }
   }
   insertPeer.run(
@@ -344,6 +414,7 @@ function handleRegister(body: RegisterRequest): RegisterResponse {
     body.claude_pid ?? null,
     body.claude_key ?? null,
     body.runtime ?? null,
+    host,
     body.cwd,
     body.git_root,
     body.tty,
@@ -387,13 +458,17 @@ function handleSetName(body: { id: string; name: string }): {
   }
   const clash = livePeers().find((p) => p.id !== body.id && p.name.toLowerCase() === name);
   if (clash) {
-    return { ok: false, error: `Name "${name}" is already taken by peer ${clash.id} in ${clash.cwd}` };
+    return {
+      ok: false,
+      // Names are global (one broker issues them), so say which machine holds it
+      error: `Name "${name}" is already taken by peer ${clash.id} in ${peerHost(clash)}:${clash.cwd}`,
+    };
   }
   db.run("UPDATE peers SET name = ? WHERE id = ?", [name, body.id]);
 
   // Sticky names: a renamed primary keeps its name across relaunches
   if (isPrimary(peer, livePeers())) {
-    bindName(peer.cwd, name);
+    bindName(peerHost(peer), peer.cwd, name);
   }
 
   // Renaming a session's primary carries its agent peers along:
@@ -519,9 +594,28 @@ function handleUnregister(body: { id: string }): void {
 
 // --- HTTP Server ---
 
-async function handleRequest(req: Request): Promise<Response> {
+/**
+ * Requests from this machine (unix socket, or TCP from loopback) are trusted:
+ * the socket is filesystem-gated and loopback means a local process. Anything
+ * arriving over the network must present the shared token — without this,
+ * binding to the network would hand anyone a text-injection channel into
+ * every Claude session on it.
+ */
+function isAuthorized(req: Request, trusted: boolean): boolean {
+  if (trusted) return true;
+  if (!TOKEN) return false;
+  const header = req.headers.get("authorization") ?? "";
+  const presented = header.replace(/^Bearer\s+/i, "");
+  return presented.length > 0 && presented === TOKEN;
+}
+
+async function handleRequest(req: Request, trusted: boolean): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
+
+  if (!isAuthorized(req, trusted)) {
+    return Response.json({ error: "unauthorized" }, { status: 401 });
+  }
 
   if (req.method !== "POST") {
     if (path === "/health") {
@@ -571,19 +665,22 @@ async function handleRequest(req: Request): Promise<Response> {
   }
 }
 
-// TCP for host-local clients and backward compat
-Bun.serve({
+// TCP: host-local clients, and peers on other machines when BIND is a
+// network address. Loopback callers are trusted; remote callers need the
+// token (see isAuthorized).
+const tcpServer: import("bun").Server<undefined> = Bun.serve({
   port: PORT,
-  hostname: "127.0.0.1",
+  hostname: BIND,
   reusePort: false,
-  fetch: handleRequest,
+  fetch: (req): Promise<Response> =>
+    handleRequest(req, isLoopbackAddress(tcpServer.requestIP(req)?.address)),
 });
 
 // Unix socket: rides the home bind-mount into docker containers, where the
 // host's TCP loopback is unreachable
 Bun.serve({
   unix: SOCKET_PATH,
-  fetch: handleRequest,
+  fetch: (req) => handleRequest(req, true),
 });
 
 function cleanupSocket() {
@@ -603,5 +700,6 @@ process.on("SIGINT", () => {
 });
 
 console.error(
-  `[claude-peers broker] listening on 127.0.0.1:${PORT} and ${SOCKET_PATH} (db: ${DB_PATH})`
+  `[claude-peers broker] listening on ${BIND}:${PORT} and ${SOCKET_PATH} ` +
+    `(host: ${MY_HOST}, network auth: ${TOKEN ? "token" : "loopback only"}, db: ${DB_PATH})`
 );

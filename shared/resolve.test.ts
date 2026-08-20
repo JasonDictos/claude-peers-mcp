@@ -14,6 +14,7 @@ function peer(overrides: Partial<Peer> & { id: string }): Peer {
     claude_pid: null,
     claude_key: null,
     runtime: null,
+    host: null,
     summary: "",
     registered_at: "2026-08-04T00:00:00Z",
     last_seen: "2026-08-04T00:00:00Z",
@@ -201,6 +202,65 @@ describe("resolveTarget agent groups (shared claude_pid)", () => {
     const b = peer({ id: "kkkk1111", name: "old-two", cwd: "/home/jason/dproxy", claude_pid: null });
     const r = resolveTarget([a, b], "~/dproxy", HOME);
     expect(r.kind).toBe("ambiguous");
+  });
+});
+
+describe("resolveTarget across machines", () => {
+  // Same project checked out on two machines — the classic collision
+  const local = peer({
+    id: "nnnn1111",
+    name: "desk-tools",
+    cwd: "/home/jason/archiver-tools",
+    git_root: "/home/jason/archiver-tools",
+    host: "jason-desktop",
+    claude_key: "100:1",
+  });
+  const remote = peer({
+    id: "oooo2222",
+    name: "arch-tools",
+    cwd: "/home/jason/archiver-tools",
+    git_root: "/home/jason/archiver-tools",
+    host: "archiver",
+    claude_key: "100:1", // same pid+starttime by chance; different machine
+  });
+  const both = [local, remote];
+
+  test("bare path matching both machines is ambiguous", () => {
+    const r = resolveTarget(both, "~/archiver-tools", HOME);
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind === "ambiguous") {
+      expect(r.candidates.map((p) => p.host).sort()).toEqual(["archiver", "jason-desktop"]);
+    }
+  });
+
+  test("host-qualified path picks that machine", () => {
+    const r = resolveTarget(both, "archiver:~/archiver-tools", HOME);
+    expect(r).toEqual({ kind: "match", peer: remote });
+  });
+
+  test("host prefix is case-insensitive", () => {
+    const r = resolveTarget(both, "ARCHIVER:~/archiver-tools", HOME);
+    expect(r).toEqual({ kind: "match", peer: remote });
+  });
+
+  test("bare host: resolves to that machine's only session", () => {
+    const r = resolveTarget(both, "archiver:", HOME);
+    expect(r).toEqual({ kind: "match", peer: remote });
+  });
+
+  test("host-qualified name works too", () => {
+    const r = resolveTarget(both, "archiver:arch-tools", HOME);
+    expect(r).toEqual({ kind: "match", peer: remote });
+  });
+
+  test("unknown host prefix falls through instead of matching", () => {
+    const r = resolveTarget(both, "nosuchbox:~/archiver-tools", HOME);
+    expect(r).toEqual({ kind: "none" });
+  });
+
+  test("names stay globally addressable without a host prefix", () => {
+    const r = resolveTarget(both, "arch-tools", HOME);
+    expect(r).toEqual({ kind: "match", peer: remote });
   });
 });
 
