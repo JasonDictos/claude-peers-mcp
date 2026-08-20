@@ -275,6 +275,21 @@ Host names match on short name, FQDN, or IP: a peer registered as `archiver.lan`
 
 Remote peers are judged alive by heartbeat rather than by PID, since a PID from another machine means nothing locally — and session grouping, re-registration, and sticky names are all scoped per host, so two machines that happen to share a PID or a directory never clobber each other.
 
+## Updating
+
+Each machine has its own checkout, so each updates itself:
+
+```bash
+bun ~/claude-peers-mcp/cli.ts update
+```
+
+It pulls the current branch, runs `bun install` only if dependencies moved, and restarts the broker this machine hosts (a long-lived broker otherwise keeps serving old code). If the broker is remote it says so rather than touching it.
+
+Two things worth knowing:
+
+- **Sessions keep running the old code until their MCP server restarts** — `/mcp` reconnect, or start a new session. The broker and CLI update immediately.
+- The command can only update a checkout that already has it. Bootstrapping an older clone is one `git pull` first.
+
 ## Configuration
 
 | Environment variable | Default                | Description                                  |
