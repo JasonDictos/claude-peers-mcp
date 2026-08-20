@@ -564,6 +564,14 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
   return { ok: true, to: { id: peer.id, name: peer.name } };
 }
 
+/** Undelivered count for a peer — does NOT consume, unlike /poll-messages. */
+function handlePending(body: { id: string }): { count: number } {
+  const row = db
+    .query("SELECT COUNT(*) AS n FROM messages WHERE to_id = ? AND delivered = 0")
+    .get(body.id) as { n: number } | null;
+  return { count: row?.n ?? 0 };
+}
+
 function handleLog(body: { limit?: number; after_id?: number }): { messages: Message[] } {
   const limit = Math.min(Math.max(body.limit ?? 50, 1), 500);
   const messages = selectRecentMessages.all(body.after_id ?? 0, limit) as Message[];
@@ -651,6 +659,8 @@ async function handleRequest(req: Request, trusted: boolean): Promise<Response> 
         }
         return Response.json(result);
       }
+      case "/pending":
+        return Response.json(handlePending(body as { id: string }));
       case "/log":
         return Response.json(handleLog(body as { limit?: number; after_id?: number }));
       case "/unregister":

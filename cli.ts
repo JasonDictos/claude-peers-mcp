@@ -276,9 +276,17 @@ switch (cmd) {
         // silently dropped by Claude Code. Say so; it looks like a network
         // fault otherwise.
         if (self.claude_pid != null && channelEnabled(self.claude_pid) === false) {
+          let pending = 0;
+          try {
+            pending = (await brokerFetch<{ count: number }>("/pending", { id: self.id })).count;
+          } catch {
+            // Broker unreachable — still worth warning
+          }
           console.log(
-            `\nWARNING: this session did not load claude-peers as a channel, so messages\n` +
-              `from peers are dropped instead of appearing in the terminal. Relaunch with:\n` +
+            `\nWARNING: this session did not load claude-peers as a channel, so peer messages\n` +
+              `cannot arrive on their own${pending > 0 ? ` (${pending} waiting)` : ""}. ` +
+              `They are held, not lost: ask this session to\n` +
+              `run check_messages, or see them all with "cli.ts log". For live delivery, relaunch:\n` +
               `  claude --dangerously-load-development-channels server:claude-peers`
           );
         }
@@ -310,6 +318,7 @@ switch (cmd) {
 
     let name: string | null = null;
     let pushOff = false;
+    let pending = 0;
     try {
       const peers = await listAllPeers(300);
       const self = findSelf(peers, cwd);
@@ -317,6 +326,12 @@ switch (cmd) {
       // Registered, but the session never loaded claude-peers as a channel:
       // inbound messages are dropped silently, so flag it in the status bar
       pushOff = self?.claude_pid != null && channelEnabled(self.claude_pid) === false;
+      // Push is off, so messages sit queued rather than arriving — show how
+      // many are waiting. Only in this case: with push on the queue is
+      // drained within a second, so it would always read zero.
+      if (pushOff && self) {
+        pending = (await brokerFetch<{ count: number }>("/pending", { id: self.id }, 250)).count;
+      }
     } catch {
       // Broker down — no name
     }
@@ -337,7 +352,11 @@ switch (cmd) {
     let line = `\x1b[36m${short}\x1b[0m`;
     if (branch) line += ` \x1b[93m${branch}\x1b[0m`;
     if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
-    if (pushOff) line += ` \x1b[91m[no-push]\x1b[0m`;
+    if (pushOff) {
+      line += pending > 0
+        ? ` \x1b[91m[${pending} queued, no-push]\x1b[0m`
+        : ` \x1b[91m[no-push]\x1b[0m`;
+    }
     if (model) line += ` \x1b[92m· ${model}\x1b[0m`;
     line += inDocker ? ` \x1b[94m[docker]\x1b[0m` : ` \x1b[38;5;208m[host]\x1b[0m`;
     process.stdout.write(line);

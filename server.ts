@@ -136,6 +136,8 @@ let mySummary = "";
 let myCwd = process.cwd();
 let myGitRoot: string | null = null;
 let myTty: string | null = null;
+/** True when Claude Code would drop anything we push (no channel listener). */
+let pushDisabled = false;
 
 async function register(): Promise<void> {
   const reg = await brokerFetch<RegisterResponse>("/register", {
@@ -443,14 +445,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       ];
       if (myGitRoot) parts.push(`Repo: ${myGitRoot}`);
       if (mySummary) parts.push(`Summary: ${mySummary}`);
-      // Without the channel flag, Claude Code silently drops pushed messages:
-      // this session can send but will never be told when peers reply.
-      if (process.ppid && channelEnabled(process.ppid) === false) {
+      // Without the channel flag, Claude Code drops anything we push: this
+      // session can send, but peers' replies will never arrive on their own.
+      if (pushDisabled) {
+        let pending = 0;
+        try {
+          pending = (await brokerFetch<{ count: number }>("/pending", { id: myId })).count;
+        } catch {
+          // Broker unreachable — report the condition without a count
+        }
         parts.push(
           `Channel push: DISABLED — this session was not started with ` +
-            `"--dangerously-load-development-channels server:claude-peers", so messages from ` +
-            `peers are dropped instead of arriving. Tell the user to relaunch with that flag; ` +
-            `until then, read messages with check_messages or "cli.ts log".`
+            `"--dangerously-load-development-channels server:claude-peers", so peer messages ` +
+            `cannot arrive on their own. They are held for you: ${pending} waiting now — call ` +
+            `check_messages to read them, and tell the user to relaunch with that flag for ` +
+            `live delivery.`
         );
       }
       return {
@@ -505,6 +514,13 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 
 async function pollAndPushMessages() {
   if (!myId) return;
+
+  // If this session never loaded claude-peers as a channel, Claude Code
+  // discards whatever we push. Polling would consume the messages on their
+  // way into that void, so leave them queued instead: they stay visible in
+  // `cli.ts log`, counted by /pending (statusline), and retrievable whenever
+  // Claude calls check_messages.
+  if (pushDisabled) return;
 
   try {
     const result = await brokerFetch<PollMessagesResponse>("/poll-messages", { id: myId });
@@ -618,10 +634,12 @@ async function main() {
   mySummary = initialSummary;
   await register();
 
-  if (process.ppid && channelEnabled(process.ppid) === false) {
+  pushDisabled = !!process.ppid && channelEnabled(process.ppid) === false;
+  if (pushDisabled) {
     log(
       `WARNING: session not started with --dangerously-load-development-channels ` +
-        `server:claude-peers — inbound peer messages will be dropped, not shown`
+        `server:claude-peers — inbound messages cannot be pushed, so they are left ` +
+        `queued for check_messages instead of being consumed and lost`
     );
   }
 
