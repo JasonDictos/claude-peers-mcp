@@ -374,7 +374,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           content: [
             {
               type: "text" as const,
-              text: `Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`,
+              text: result.queued_offline
+                ? `No live session for "${target}" right now — message queued for ${result.to?.name}. ` +
+                  `It is delivered when that session next starts (held for 7 days).`
+                : `Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`,
             },
           ],
         };

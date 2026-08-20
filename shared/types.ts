@@ -82,6 +82,8 @@ export interface SendMessageRequest {
 export interface SendMessageResponse {
   ok: boolean;
   error?: string;
+  /** True when no live session matched: held for that mailbox until it returns. */
+  queued_offline?: boolean;
   /** Resolved recipient on success. */
   to?: { id: PeerId; name: string };
   /** On ambiguous/no-match errors: peers the sender could target instead. */

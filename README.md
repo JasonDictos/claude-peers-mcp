@@ -229,6 +229,17 @@ Sessions inside a docker container can join the same peer network as the host, p
 
 - Liveness and agent grouping are PID-namespace-aware: container peers are judged by heartbeat freshness (a container pid means nothing to the host broker), and session grouping keys include the process start time so pid numbers can't collide across namespaces. A peer wrongly pruned (e.g. after a laptop suspend) re-registers automatically and gets its sticky name back.
 
+## Durable messages
+
+A message is addressed to a **mailbox** — the `(host, cwd, name)` a session lives at — not to the peer registration that happens to be running. Peer IDs change every time a session restarts; mailboxes don't. So:
+
+- Mail sent to a session that exits before reading it is **kept**, not destroyed with the peer, and delivered when that session comes back.
+- You can message a session that is **not running**: `send` resolves against known mailboxes and reports `queued for <name> (delivered when it returns)` instead of failing.
+- Renaming a session retargets its queued mail, so nothing is stranded.
+- Undelivered mail waits 7 days; delivered mail stays 30 days as history for `cli.ts log`.
+
+`cli.ts log` shows queued and delivered messages alike, so nothing is invisible while it waits.
+
 ## Multiple machines
 
 Peers on different machines join one network: a single **hub** broker holds the peer list, and other machines' sessions connect to it over TCP.

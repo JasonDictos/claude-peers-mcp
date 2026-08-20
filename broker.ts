@@ -24,7 +24,8 @@ import type {
   Message,
 } from "./shared/types.ts";
 import { generateName, childName } from "./shared/names.ts";
-import { resolveTarget, sessionKey, sessionKeyOf } from "./shared/resolve.ts";
+import { resolveTarget, resolveMailbox, sessionKey, sessionKeyOf } from "./shared/resolve.ts";
+import type { Mailbox } from "./shared/resolve.ts";
 import { getRuntimeId } from "./shared/runtime.ts";
 import { loadConfig, isLoopbackBind, isLoopbackAddress } from "./shared/config.ts";
 import { existsSync, unlinkSync, lstatSync } from "node:fs";
@@ -189,6 +190,10 @@ try {
 // Names denormalized onto messages so the log stays readable after peers die
 ensureColumn("messages", "from_name TEXT NOT NULL DEFAULT ''");
 ensureColumn("messages", "to_name TEXT NOT NULL DEFAULT ''");
+// Durable mailbox: peer ids die with each registration, but (host, cwd, name)
+// outlives them, so mail can wait for a session to come back
+ensureColumn("messages", "to_host TEXT");
+ensureColumn("messages", "to_cwd TEXT");
 
 /**
  * Liveness: pid check (signal 0) when the peer shares our PID namespace,
@@ -215,16 +220,35 @@ function cleanStalePeers() {
   const peers = db.query("SELECT * FROM peers").all() as Peer[];
   for (const peer of peers) {
     if (!isPeerAlive(peer)) {
+      // Undelivered mail deliberately survives the peer: it is addressed to
+      // the mailbox (host, cwd, name), so the session collects it when it
+      // comes back. pruneMessages() ages it out eventually.
       db.run("DELETE FROM peers WHERE id = ?", [peer.id]);
-      db.run("DELETE FROM messages WHERE to_id = ? AND delivered = 0", [peer.id]);
     }
   }
 }
 
 cleanStalePeers();
 
-// Periodically clean stale peers (every 30s)
-setInterval(cleanStalePeers, 30_000);
+/**
+ * Age out messages. Undelivered mail waits a week for its session to return;
+ * delivered mail is history for `cli.ts log` and is kept a month.
+ */
+const UNDELIVERED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const HISTORY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+function pruneMessages() {
+  const iso = (ms: number) => new Date(Date.now() - ms).toISOString();
+  db.run("DELETE FROM messages WHERE delivered = 0 AND sent_at < ?", [iso(UNDELIVERED_TTL_MS)]);
+  db.run("DELETE FROM messages WHERE delivered = 1 AND sent_at < ?", [iso(HISTORY_TTL_MS)]);
+}
+
+pruneMessages();
+
+// Periodically clean stale peers and age out messages (every 30s)
+setInterval(() => {
+  cleanStalePeers();
+  pruneMessages();
+}, 30_000);
 
 // Name peers that registered before the name column existed
 function nameUnnamedPeers() {
@@ -336,8 +360,8 @@ const selectAllPeers = db.prepare(`
 `);
 
 const insertMessage = db.prepare(`
-  INSERT INTO messages (from_id, to_id, from_name, to_name, text, sent_at, delivered)
-  VALUES (?, ?, ?, ?, ?, ?, 0)
+  INSERT INTO messages (from_id, to_id, from_name, to_name, to_host, to_cwd, text, sent_at, delivered)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)
 `);
 
 const selectRecentMessages = db.prepare(`
@@ -346,8 +370,24 @@ const selectRecentMessages = db.prepare(`
   ) ORDER BY id ASC
 `);
 
+// A session collects mail sent to its current registration *or* to its
+// mailbox — mail queued while it was away, or addressed to it by name/path
+// while offline.
 const selectUndelivered = db.prepare(`
-  SELECT * FROM messages WHERE to_id = ? AND delivered = 0 ORDER BY sent_at ASC
+  SELECT * FROM messages
+  WHERE delivered = 0
+    AND ( to_id = ?1
+          OR (to_name != '' AND to_name = ?2
+              AND COALESCE(to_host, '') = ?3 AND COALESCE(to_cwd, '') = ?4) )
+  ORDER BY sent_at ASC
+`);
+
+const countUndelivered = db.prepare(`
+  SELECT COUNT(*) AS n FROM messages
+  WHERE delivered = 0
+    AND ( to_id = ?1
+          OR (to_name != '' AND to_name = ?2
+              AND COALESCE(to_host, '') = ?3 AND COALESCE(to_cwd, '') = ?4) )
 `);
 
 const markDelivered = db.prepare(`
@@ -471,6 +511,14 @@ function handleSetName(body: { id: string; name: string }): {
     bindName(peerHost(peer), peer.cwd, name);
   }
 
+  // Mail queued under the old name belongs to the same mailbox — retarget it
+  // so a rename doesn't strand undelivered messages
+  db.run(
+    `UPDATE messages SET to_name = ?
+     WHERE delivered = 0 AND to_name = ? AND COALESCE(to_host,'') = ? AND COALESCE(to_cwd,'') = ?`,
+    [name, peer.name, peerHost(peer), peer.cwd]
+  );
+
   // Renaming a session's primary carries its agent peers along:
   // old-name-N -> new-name-N
   const key = sessionKey(peer);
@@ -524,6 +572,13 @@ function handleListPeers(body: ListPeersRequest): Peer[] {
   return peers;
 }
 
+function senderName(fromId: string): string {
+  const row = db.query("SELECT name FROM peers WHERE id = ?").get(fromId) as
+    | { name: string }
+    | null;
+  return row?.name ?? fromId;
+}
+
 function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
   const target = body.to ?? body.to_id;
   if (!target) {
@@ -535,6 +590,37 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
   const resolution = resolveTarget(peers, target, process.env.HOME ?? "/");
 
   if (resolution.kind === "none") {
+    // No live session — but the target may name a mailbox we know (a session
+    // that has run in that directory before). Queue it there rather than
+    // failing: the message is delivered when that session comes back.
+    const boxes = db.query("SELECT host, cwd, name FROM name_bindings").all() as Mailbox[];
+    const box = resolveMailbox(boxes, target, process.env.HOME ?? "/");
+    if (box.kind === "match") {
+      insertMessage.run(
+        body.from_id,
+        "",
+        senderName(body.from_id),
+        box.box.name,
+        box.box.host,
+        box.box.cwd,
+        body.text,
+        new Date().toISOString()
+      );
+      return {
+        ok: true,
+        queued_offline: true,
+        to: { id: "", name: box.box.name },
+      };
+    }
+    if (box.kind === "ambiguous") {
+      return {
+        ok: false,
+        error:
+          `"${target}" matches no live peer, and several known mailboxes ` +
+          `(${box.candidates.map((b) => `${b.name} in ${b.host}:${b.cwd}`).join(", ")}) — ` +
+          `address one by name.`,
+      };
+    }
     return {
       ok: false,
       error: `No peer matches "${target}". Live peers are listed in candidates.`,
@@ -550,14 +636,13 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
   }
 
   const peer = resolution.peer;
-  const sender = db.query("SELECT name FROM peers WHERE id = ?").get(body.from_id) as
-    | { name: string }
-    | null;
   insertMessage.run(
     body.from_id,
     peer.id,
-    sender?.name ?? body.from_id,
+    senderName(body.from_id),
     peer.name,
+    peerHost(peer),
+    peer.cwd,
     body.text,
     new Date().toISOString()
   );
@@ -566,9 +651,14 @@ function handleSendMessage(body: SendMessageRequest): SendMessageResponse {
 
 /** Undelivered count for a peer — does NOT consume, unlike /poll-messages. */
 function handlePending(body: { id: string }): { count: number } {
-  const row = db
-    .query("SELECT COUNT(*) AS n FROM messages WHERE to_id = ? AND delivered = 0")
-    .get(body.id) as { n: number } | null;
+  const peer = db.query("SELECT * FROM peers WHERE id = ?").get(body.id) as Peer | null;
+  if (!peer) return { count: 0 };
+  const row = countUndelivered.get(
+    peer.id,
+    peer.name,
+    peerHost(peer),
+    peer.cwd
+  ) as { n: number } | null;
   return { count: row?.n ?? 0 };
 }
 
@@ -579,14 +669,19 @@ function handleLog(body: { limit?: number; after_id?: number }): { messages: Mes
 }
 
 function handlePollMessages(body: PollMessagesRequest): PollMessagesResponse | null {
-  const exists = db.query("SELECT id FROM peers WHERE id = ?").get(body.id);
-  if (!exists) return null;
+  const peer = db.query("SELECT * FROM peers WHERE id = ?").get(body.id) as Peer | null;
+  if (!peer) return null;
 
   // Polling doubles as a heartbeat — container peers are liveness-checked
   // by last_seen alone
   updateLastSeen.run(new Date().toISOString(), body.id);
 
-  const messages = selectUndelivered.all(body.id) as Message[];
+  const messages = selectUndelivered.all(
+    peer.id,
+    peer.name,
+    peerHost(peer),
+    peer.cwd
+  ) as Message[];
 
   // Mark them as delivered
   for (const msg of messages) {

@@ -1,5 +1,6 @@
 import { test, expect, describe } from "bun:test";
-import { resolveTarget } from "./resolve.ts";
+import { resolveTarget, resolveMailbox } from "./resolve.ts";
+import type { Mailbox } from "./resolve.ts";
 import type { Peer } from "./types.ts";
 
 const HOME = "/home/jason";
@@ -289,5 +290,47 @@ describe("resolveTarget misc", () => {
   test("empty peer list returns none", () => {
     const r = resolveTarget([], "~/archiver-tools", HOME);
     expect(r).toEqual({ kind: "none" });
+  });
+});
+
+describe("resolveMailbox (offline addressing)", () => {
+  const boxes: Mailbox[] = [
+    { host: "jason-desktop", cwd: "/home/jason/archiver-tools", name: "desk-tools" },
+    { host: "archiver", cwd: "/home/jason/archiver-tools", name: "arch-tools" },
+    { host: "archiver", cwd: "/home/jason/libeen", name: "libeen-guy" },
+  ];
+
+  test("by name, with no live session anywhere", () => {
+    const r = resolveMailbox(boxes, "libeen-guy", HOME);
+    expect(r.kind).toBe("match");
+    if (r.kind === "match") expect(r.box.cwd).toBe("/home/jason/libeen");
+  });
+
+  test("host-qualified path picks the right machine's mailbox", () => {
+    const r = resolveMailbox(boxes, "archiver:~/archiver-tools", HOME);
+    expect(r.kind).toBe("match");
+    if (r.kind === "match") expect(r.box.name).toBe("arch-tools");
+  });
+
+  test("name@host form works for mailboxes too", () => {
+    const r = resolveMailbox(boxes, "desk-tools@jason-desktop", HOME);
+    expect(r.kind).toBe("match");
+    if (r.kind === "match") expect(r.box.host).toBe("jason-desktop");
+  });
+
+  test("a path present on two machines is ambiguous", () => {
+    const r = resolveMailbox(boxes, "~/archiver-tools", HOME);
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind === "ambiguous") {
+      expect(r.candidates.map((b) => b.host).sort()).toEqual(["archiver", "jason-desktop"]);
+    }
+  });
+
+  test("unknown target has no mailbox", () => {
+    expect(resolveMailbox(boxes, "nobody-here", HOME).kind).toBe("none");
+  });
+
+  test("empty mailbox list resolves nothing", () => {
+    expect(resolveMailbox([], "libeen-guy", HOME).kind).toBe("none");
   });
 });
