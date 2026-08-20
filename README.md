@@ -77,10 +77,24 @@ Paths match a peer's working directory or its git repo (so `~/een-ports` finds a
 
 Every session gets a human-readable name at registration — `goofy-joe`, `eager-eddy` — unique among live peers. Names and IDs are interchangeable anywhere a target is accepted.
 
+Don't like the generated name? Rename the session from inside it:
+
+```bash
+bun ~/claude-peers-mcp/cli.ts iam archiver-guy
+```
+
+Names are normalized (lowercase, spaces become dashes) and must be unique among live peers — a collision tells you who already has the name.
+
+Names are **sticky per directory**: the broker remembers which name belongs to which working directory, so relaunching a session in `~/een-ports` brings back its old name (generated or custom) instead of rolling a new one. If a second session starts in the same directory while the first is running, it gets a fresh name and the binding stays with the original.
+
+### Sessions with subagents
+
+A session running subagents opens extra MCP connections, each registering as its own peer. These are detected (they share the session's process) and named as suffixed children: the top-level session is `goofy-joe`, its agents `goofy-joe-1`, `goofy-joe-2`, ... Path addressing always resolves to the top-level session — agents are only reachable by their explicit suffixed name. Renaming the session (`iam`) renames its agents with it.
+
 You can show the name in your Claude Code status bar by pointing `statusLine` in `~/.claude/settings.json` at the bundled command:
 
 ```json
-"statusLine": { "type": "command", "command": "bun ~/claude-peers-mcp/cli.ts statusline" }
+"statusLine": { "type": "command", "command": "~/.bun/bin/bun ~/claude-peers-mcp/cli.ts statusline" }
 ```
 
 It prints `~/archiver-tools (main) · goofy-joe` and degrades gracefully (no name shown) when the broker is down.
@@ -119,18 +133,94 @@ cd ~/claude-peers-mcp
 bun cli.ts status                # broker status + all peers
 bun cli.ts peers                 # list peers
 bun cli.ts send <target> <msg>   # send a message (target: name, ID, or ~/path)
+bun cli.ts broadcast <msg>       # send a message to every peer (one per session)
 bun cli.ts whoami                # this session's peer name and ID
+bun cli.ts iam <name>            # rename this session's peer
 bun cli.ts statusline            # statusline command (Claude Code JSON on stdin)
 bun cli.ts kill-broker           # stop the broker
 ```
 
+## Handy slash commands
+
+Drop these in `~/.claude/commands/` to inspect the peer network from any session. Each runs the CLI and reports the result (replace the path with wherever you cloned the repo):
+
+```markdown
+<!-- ~/.claude/commands/peer-whoami.md -->
+---
+description: Show this session's claude-peers identity (name, ID, cwd)
+allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
+---
+Peer identity of this session:
+
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts whoami`
+
+Report the identity above to the user in one line.
+```
+
+```markdown
+<!-- ~/.claude/commands/peer-list.md -->
+---
+description: List all Claude Code peers on this machine (claude-peers)
+allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
+---
+Current peers on the claude-peers network:
+
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts peers`
+
+Present the peers above as a compact table: name, ID, directory, summary.
+```
+
+```markdown
+<!-- ~/.claude/commands/peer-iam.md -->
+---
+description: Rename this session's claude-peers name
+argument-hint: <name>
+allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
+---
+Rename result:
+
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts iam $ARGUMENTS`
+
+Confirm the rename to the user in one line (old name -> new name).
+```
+
+```markdown
+<!-- ~/.claude/commands/peer-broadcast.md -->
+---
+description: Send a message to all claude-peers sessions on this machine
+argument-hint: <message>
+allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
+---
+Broadcast result:
+
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts broadcast $ARGUMENTS`
+
+Confirm who received the broadcast. Subagent peers are skipped — each session gets the message once.
+```
+
+Then `/peer-whoami`, `/peer-list`, `/peer-iam <name>`, and `/peer-broadcast <message>` work in every session.
+
+## Docker containers
+
+Sessions inside a docker container can join the same peer network as the host, provided the host home directory is bind-mounted (e.g. `-v ~/:/home/you`):
+
+- The broker listens on a **unix socket** (`~/.claude-peers.sock`) in addition to TCP. The socket rides the home mount into the container, where the host's TCP loopback is unreachable. Point container sessions at it with `CLAUDE_PEERS_SOCK=/path/to/mounted/home/.claude-peers.sock`.
+- Register the MCP with a bun path that exists in both worlds — `~/.bun/bin/bun` travels with the home mount, `/usr/local/bin/bun` doesn't:
+
+  ```bash
+  claude mcp add --scope user --transport stdio claude-peers -- ~/.bun/bin/bun ~/claude-peers-mcp/server.ts
+  ```
+
+- Liveness and agent grouping are PID-namespace-aware: container peers are judged by heartbeat freshness (a container pid means nothing to the host broker), and session grouping keys include the process start time so pid numbers can't collide across namespaces. A peer wrongly pruned (e.g. after a laptop suspend) re-registers automatically and gets its sticky name back.
+
 ## Configuration
 
-| Environment variable | Default              | Description                           |
-| -------------------- | -------------------- | ------------------------------------- |
-| `CLAUDE_PEERS_PORT`  | `7899`               | Broker port                           |
-| `CLAUDE_PEERS_DB`    | `~/.claude-peers.db` | SQLite database path                  |
-| `OPENAI_API_KEY`     | —                    | Enables auto-summary via gpt-5.4-nano |
+| Environment variable | Default                | Description                                  |
+| -------------------- | ---------------------- | -------------------------------------------- |
+| `CLAUDE_PEERS_PORT`  | `7899`                 | Broker TCP port                              |
+| `CLAUDE_PEERS_SOCK`  | `~/.claude-peers.sock` | Broker unix socket (works across bind mounts) |
+| `CLAUDE_PEERS_DB`    | `~/.claude-peers.db`   | SQLite database path                         |
+| `OPENAI_API_KEY`     | —                      | Enables auto-summary via gpt-5.4-nano        |
 
 ## Requirements
 

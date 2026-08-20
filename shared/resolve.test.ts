@@ -12,6 +12,8 @@ function peer(overrides: Partial<Peer> & { id: string }): Peer {
     tty: null,
     name: "",
     claude_pid: null,
+    claude_key: null,
+    runtime: null,
     summary: "",
     registered_at: "2026-08-04T00:00:00Z",
     last_seen: "2026-08-04T00:00:00Z",
@@ -113,6 +115,92 @@ describe("resolveTarget by path", () => {
     // /home/jason/een-ports-backup is not inside /home/jason/een-ports
     const r = resolveTarget(peers, "~/een-ports-backup", HOME);
     expect(r).toEqual({ kind: "none" });
+  });
+});
+
+describe("resolveTarget agent groups (shared claude_pid)", () => {
+  const primary = peer({
+    id: "eeee5555",
+    name: "goofy-joe",
+    cwd: "/home/jason/dproxy",
+    claude_pid: 777,
+    registered_at: "2026-08-04T10:00:00Z",
+  });
+  const agent1 = peer({
+    id: "ffff6666",
+    name: "goofy-joe-1",
+    cwd: "/home/jason/dproxy",
+    claude_pid: 777,
+    registered_at: "2026-08-04T10:05:00Z",
+  });
+  const agent2 = peer({
+    id: "gggg7777",
+    name: "goofy-joe-2",
+    cwd: "/home/jason/dproxy",
+    claude_pid: 777,
+    registered_at: "2026-08-04T10:06:00Z",
+  });
+
+  test("path matching a session with agents resolves to the primary (earliest registered)", () => {
+    const r = resolveTarget([agent2, primary, agent1], "~/dproxy", HOME);
+    expect(r).toEqual({ kind: "match", peer: primary });
+  });
+
+  test("an agent is still reachable by its suffixed name", () => {
+    const r = resolveTarget([primary, agent1, agent2], "goofy-joe-2", HOME);
+    expect(r).toEqual({ kind: "match", peer: agent2 });
+  });
+
+  test("two distinct sessions in one dir are still ambiguous, candidates are the primaries", () => {
+    const other = peer({
+      id: "hhhh8888",
+      name: "eager-eddy",
+      cwd: "/home/jason/dproxy",
+      claude_pid: 888,
+      registered_at: "2026-08-04T11:00:00Z",
+    });
+    const otherAgent = peer({
+      id: "iiii9999",
+      name: "eager-eddy-1",
+      cwd: "/home/jason/dproxy",
+      claude_pid: 888,
+      registered_at: "2026-08-04T11:01:00Z",
+    });
+    const r = resolveTarget([primary, agent1, agent2, other, otherAgent], "~/dproxy", HOME);
+    expect(r.kind).toBe("ambiguous");
+    if (r.kind === "ambiguous") {
+      expect(r.candidates.map((p) => p.name).sort()).toEqual(["eager-eddy", "goofy-joe"]);
+    }
+  });
+
+  test("same claude_pid number in different namespaces (distinct claude_key) is not grouped", () => {
+    // Host session and container session both have claude pid 1234 — the
+    // start-time suffix in claude_key keeps them apart
+    const host = peer({
+      id: "llll2222",
+      name: "host-guy",
+      cwd: "/home/jason/dproxy",
+      claude_pid: 1234,
+      claude_key: "1234:100",
+      runtime: "desktop:100",
+    });
+    const container = peer({
+      id: "mmmm3333",
+      name: "docker-guy",
+      cwd: "/home/jason/dproxy",
+      claude_pid: 1234,
+      claude_key: "1234:99999",
+      runtime: "desktop:99999",
+    });
+    const r = resolveTarget([host, container], "~/dproxy", HOME);
+    expect(r.kind).toBe("ambiguous");
+  });
+
+  test("peers without claude_pid are never grouped", () => {
+    const a = peer({ id: "jjjj0000", name: "old-one", cwd: "/home/jason/dproxy", claude_pid: null });
+    const b = peer({ id: "kkkk1111", name: "old-two", cwd: "/home/jason/dproxy", claude_pid: null });
+    const r = resolveTarget([a, b], "~/dproxy", HOME);
+    expect(r.kind).toBe("ambiguous");
   });
 });
 

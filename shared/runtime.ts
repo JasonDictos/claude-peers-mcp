@@ -1,0 +1,63 @@
+/**
+ * Runtime identity helpers for containers.
+ *
+ * PIDs are only meaningful within one PID namespace: a peer inside a docker
+ * container has a pid the host broker can't signal-0, and pid numbers collide
+ * across namespaces. Two keys solve this:
+ *
+ * - runtime id: identifies the namespace (host or a specific container) so
+ *   the broker knows when a pid liveness check is valid.
+ * - claude key: pid + process start time, unique across namespaces, used to
+ *   group a session's subagent MCP connections.
+ */
+
+import { readFileSync } from "node:fs";
+import { hostname } from "node:os";
+
+/** Fields of /proc/<pid>/stat after the (comm) — comm may contain spaces. */
+function statFields(pid: number): string[] | null {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const close = stat.lastIndexOf(")");
+    if (close < 0) return null;
+    return stat.slice(close + 1).trim().split(/\s+/);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Process start time in clock ticks since boot (stat field 22), or null.
+ * Without /proc (macOS) callers fall back to a constant "0" suffix — runtime
+ * and session keys then degrade to plain pid matching, which is fine there:
+ * the cross-namespace collision this guards against is a Linux-container
+ * scenario.
+ */
+export function getStartTime(pid: number): string | null {
+  // After (comm): state=f3 ... starttime=f22 -> index 19
+  return statFields(pid)?.[19] ?? null;
+}
+
+/** Parent pid from /proc (stat field 4), or null. */
+export function getParentPid(pid: number): number | null {
+  const ppid = statFields(pid)?.[1];
+  const n = ppid ? parseInt(ppid, 10) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/**
+ * Session grouping key for a Claude process: unique across PID namespaces
+ * (same pid number in host + container have different start times).
+ */
+export function claudeKey(pid: number): string {
+  return `${pid}:${getStartTime(pid) ?? "0"}`;
+}
+
+/**
+ * Identifies this PID namespace: hostname + start time of pid 1 (the boot for
+ * a host, the container init for a container). Peers with a different runtime
+ * id can't be pid-checked and are judged by heartbeat freshness instead.
+ */
+export function getRuntimeId(): string {
+  return `${hostname()}:${getStartTime(1) ?? "0"}`;
+}

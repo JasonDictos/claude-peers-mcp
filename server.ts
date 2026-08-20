@@ -32,34 +32,21 @@ import {
   getGitBranch,
   getRecentFiles,
 } from "./shared/summarize.ts";
+import { brokerFetch } from "./shared/client.ts";
+import { claudeKey, getRuntimeId, getParentPid } from "./shared/runtime.ts";
 
 // --- Configuration ---
 
-const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
-const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
 const POLL_INTERVAL_MS = 1000;
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const BROKER_SCRIPT = new URL("./broker.ts", import.meta.url).pathname;
 
 // --- Broker communication ---
 
-async function brokerFetch<T>(path: string, body: unknown): Promise<T> {
-  const res = await fetch(`${BROKER_URL}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const err = await res.text();
-    throw new Error(`Broker error (${path}): ${res.status} ${err}`);
-  }
-  return res.json() as Promise<T>;
-}
-
 async function isBrokerAlive(): Promise<boolean> {
   try {
-    const res = await fetch(`${BROKER_URL}/health`, { signal: AbortSignal.timeout(2000) });
-    return res.ok;
+    await brokerFetch("/health", undefined, 2000);
+    return true;
   } catch {
     return false;
   }
@@ -141,6 +128,29 @@ let myName: string | null = null;
 let mySummary = "";
 let myCwd = process.cwd();
 let myGitRoot: string | null = null;
+let myTty: string | null = null;
+
+async function register(): Promise<void> {
+  const reg = await brokerFetch<RegisterResponse>("/register", {
+    pid: process.pid,
+    claude_pid: process.ppid || null,
+    claude_key: process.ppid ? claudeKey(process.ppid) : null,
+    runtime: getRuntimeId(),
+    cwd: myCwd,
+    git_root: myGitRoot,
+    tty: myTty,
+    summary: mySummary,
+  });
+  myId = reg.id;
+  myName = reg.name;
+  log(`Registered as peer ${myName} (${myId})`);
+}
+
+/** The broker prunes peers it wrongly thinks are dead (e.g. after a laptop
+ *  suspend starves container heartbeats) — a 404 means re-register. */
+function isUnknownPeerError(e: unknown): boolean {
+  return e instanceof Error && /404/.test(e.message) && /unknown peer/.test(e.message);
+}
 
 // --- MCP Server ---
 
@@ -154,6 +164,8 @@ const mcp = new Server(
     instructions: `You are connected to the claude-peers network. Other Claude Code instances on this machine can see you and send you messages.
 
 Every peer has a human-readable name (like "goofy-joe") and an 8-char ID — the two are interchangeable as addresses. You can also address a peer by its directory path (e.g. "~/archiver-tools"): the broker matches it against each peer's working directory and git repo. If a path matches several peers, the send fails and returns the candidates so you can pick one by name.
+
+A session running subagents appears as a group: the top-level session keeps the base name (goofy-joe) and its agents are suffixed (goofy-joe-1, goofy-joe-2). Path addressing resolves to the top-level session; use a suffixed name to reach a specific agent.
 
 IMPORTANT: When you receive a <channel source="claude-peers" ...> message, RESPOND IMMEDIATELY. Do not wait until your current task is finished. Pause what you are doing, reply to the message using send_message, then resume your work. Treat incoming peer messages like a coworker tapping you on the shoulder — answer right away, even if you're in the middle of something.
 
@@ -514,6 +526,15 @@ async function pollAndPushMessages() {
       log(`Pushed message from ${fromName || msg.from_id}: ${msg.text.slice(0, 80)}`);
     }
   } catch (e) {
+    if (isUnknownPeerError(e)) {
+      log("Broker no longer knows us — re-registering");
+      try {
+        await register();
+      } catch {
+        // Broker still down, retry on next poll
+      }
+      return;
+    }
     // Broker might be down temporarily, don't crash
     log(`Poll error: ${e instanceof Error ? e.message : String(e)}`);
   }
@@ -559,18 +580,9 @@ async function main() {
   await Promise.race([summaryPromise, new Promise((r) => setTimeout(r, 3000))]);
 
   // 4. Register with broker
-  const reg = await brokerFetch<RegisterResponse>("/register", {
-    pid: process.pid,
-    claude_pid: process.ppid || null,
-    cwd: myCwd,
-    git_root: myGitRoot,
-    tty,
-    summary: initialSummary,
-  });
-  myId = reg.id;
-  myName = reg.name;
+  myTty = tty;
   mySummary = initialSummary;
-  log(`Registered as peer ${myName} (${myId})`);
+  await register();
 
   // If summary generation is still running, update it when done
   if (!initialSummary) {
@@ -599,16 +611,28 @@ async function main() {
     if (myId) {
       try {
         await brokerFetch("/heartbeat", { id: myId });
-      } catch {
-        // Non-critical
+      } catch (e) {
+        if (isUnknownPeerError(e)) {
+          try {
+            await register();
+          } catch {
+            // Broker down, retry on next beat
+          }
+        }
+        // Otherwise non-critical
       }
     }
   }, HEARTBEAT_INTERVAL_MS);
 
   // 8. Clean up on exit
+  let orphanTimer: ReturnType<typeof setInterval> | undefined;
+  let cleaningUp = false;
   const cleanup = async () => {
+    if (cleaningUp) return;
+    cleaningUp = true;
     clearInterval(pollTimer);
     clearInterval(heartbeatTimer);
+    clearInterval(orphanTimer);
     if (myId) {
       try {
         await brokerFetch("/unregister", { id: myId });
@@ -622,6 +646,23 @@ async function main() {
 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+
+  // Exit with our Claude session. Without this, a session that dies without
+  // signaling us (killed terminal, crash) leaves this process orphaned —
+  // running, heartbeating, and haunting everyone's peer list forever.
+  // stdin EOF is the clean MCP disconnect...
+  process.stdin.on("end", cleanup);
+  process.stdin.on("close", cleanup);
+  // ...and reparenting (belt and braces) means the parent died without
+  // closing our pipe.
+  const originalPpid = process.ppid;
+  orphanTimer = setInterval(() => {
+    const ppid = getParentPid(process.pid) ?? process.ppid;
+    if (ppid !== originalPpid) {
+      log("Parent Claude process exited — shutting down");
+      cleanup();
+    }
+  }, 5000);
 }
 
 main().catch((e) => {

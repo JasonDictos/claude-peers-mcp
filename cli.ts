@@ -8,6 +8,7 @@
  *   bun cli.ts status              — Show broker status and all peers
  *   bun cli.ts peers               — List all peers
  *   bun cli.ts send <target> <msg> — Send a message (target: name, ID, or path)
+ *   bun cli.ts broadcast <msg>     — Send a message to every peer (one per session)
  *   bun cli.ts whoami              — Show this session's peer name and ID
  *   bun cli.ts iam <name>          — Rename this session's peer
  *   bun cli.ts statusline          — Statusline command (reads Claude Code JSON on stdin)
@@ -15,27 +16,9 @@
  */
 
 import type { Peer, SendMessageResponse } from "./shared/types.ts";
-
-const BROKER_PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
-const BROKER_URL = `http://127.0.0.1:${BROKER_PORT}`;
-
-async function brokerFetch<T>(path: string, body?: unknown, timeoutMs = 3000): Promise<T> {
-  const opts: RequestInit = body
-    ? {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }
-    : {};
-  const res = await fetch(`${BROKER_URL}${path}`, {
-    ...opts,
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) {
-    throw new Error(`${res.status}: ${await res.text()}`);
-  }
-  return res.json() as Promise<T>;
-}
+import { brokerFetch, BROKER_PORT, BROKER_URL } from "./shared/client.ts";
+import { claudeKey, getParentPid } from "./shared/runtime.ts";
+import { sessionKey } from "./shared/resolve.ts";
 
 function listAllPeers(timeoutMs = 3000): Promise<Peer[]> {
   return brokerFetch<Peer[]>("/list-peers", { scope: "machine", cwd: "/", git_root: null }, timeoutMs);
@@ -47,13 +30,17 @@ function formatPeer(p: Peer): string {
   return parts.join("\n");
 }
 
-/** PIDs of this process's ancestors (nearest first), for claude_pid matching. */
+/** PIDs of this process's ancestors (nearest first). */
 function getAncestorPids(maxDepth = 10): number[] {
   const ancestors: number[] = [];
   let pid = process.pid;
   for (let i = 0; i < maxDepth; i++) {
-    const proc = Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(pid)]);
-    const ppid = parseInt(new TextDecoder().decode(proc.stdout).trim(), 10);
+    let ppid = getParentPid(pid);
+    if (ppid == null) {
+      // No /proc (macOS) — fall back to ps
+      const proc = Bun.spawnSync(["ps", "-o", "ppid=", "-p", String(pid)]);
+      ppid = parseInt(new TextDecoder().decode(proc.stdout).trim(), 10) || null;
+    }
     if (!ppid || ppid <= 1) break;
     ancestors.push(ppid);
     pid = ppid;
@@ -63,14 +50,23 @@ function getAncestorPids(maxDepth = 10): number[] {
 
 /**
  * Find the peer belonging to the Claude Code session this command runs inside.
- * Primary: a peer whose claude_pid is one of our ancestor processes.
+ * Primary: a peer whose claude_key (or legacy claude_pid) matches one of our
+ * ancestor processes — the key includes the process start time, so a
+ * container pid can't collide with an identically-numbered host pid.
  * Fallback: a unique cwd match.
  */
 function findSelf(peers: Peer[], cwd: string): Peer | null {
   const ancestors = getAncestorPids();
   for (const pid of ancestors) {
-    const match = peers.find((p) => p.claude_pid === pid);
-    if (match) return match;
+    const key = claudeKey(pid);
+    const matches = peers.filter(
+      (p) => p.claude_key === key || (p.claude_key == null && p.claude_pid === pid)
+    );
+    if (matches.length > 0) {
+      // Several matches = session with subagent MCP connections; the
+      // primary (top-level session) is the earliest registration
+      return matches.reduce((a, b) => (a.registered_at <= b.registered_at ? a : b));
+    }
   }
   const byCwd = peers.filter((p) => p.cwd === cwd);
   return byCwd.length === 1 ? byCwd[0]! : null;
@@ -190,6 +186,51 @@ switch (cmd) {
     break;
   }
 
+  case "broadcast": {
+    const msg = process.argv.slice(3).join(" ");
+    if (!msg) {
+      console.error("Usage: bun cli.ts broadcast <message>");
+      process.exit(1);
+    }
+    try {
+      const peers = await listAllPeers();
+      const self = findSelf(peers, process.cwd());
+      const selfKey = self ? sessionKey(self) : null;
+
+      // One message per session: collapse agent groups to their primary and
+      // skip our own session
+      const seen = new Set<string>();
+      const targets = peers
+        .sort((a, b) => a.registered_at.localeCompare(b.registered_at))
+        .filter((p) => {
+          if (self && (p.id === self.id || (selfKey && sessionKey(p) === selfKey))) return false;
+          const key = sessionKey(p);
+          if (key == null) return true;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+
+      if (targets.length === 0) {
+        console.log("No other peers to broadcast to.");
+        break;
+      }
+      for (const p of targets) {
+        const result = await brokerFetch<SendMessageResponse>("/send-message", {
+          from_id: self?.id ?? "cli",
+          to: p.id,
+          text: msg,
+        });
+        console.log(result.ok ? `-> ${p.name} (${p.cwd})` : `!! ${p.name}: ${result.error}`);
+      }
+      console.log(`Broadcast to ${targets.length} peer(s).`);
+    } catch (e) {
+      console.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
+      process.exit(1);
+    }
+    break;
+  }
+
   case "whoami": {
     try {
       const peers = await listAllPeers();
@@ -229,9 +270,23 @@ switch (cmd) {
       // Broker down — no name
     }
 
+    // Docker detection: /.dockerenv is the compose/docker marker; cgroup
+    // scan covers other container runtimes. Cheap sync checks, never throw.
+    let inDocker = false;
+    try {
+      const { existsSync, readFileSync } = await import("node:fs");
+      inDocker =
+        existsSync("/.dockerenv") ||
+        (existsSync("/proc/1/cgroup") &&
+          /docker|containerd|kubepods/.test(readFileSync("/proc/1/cgroup", "utf8")));
+    } catch {
+      // Unreadable proc — assume host
+    }
+
     let line = `\x1b[36m${short}\x1b[0m`;
     if (branch) line += ` \x1b[93m(${branch})\x1b[0m`;
     if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
+    line += inDocker ? ` \x1b[94m[docker]\x1b[0m` : ` \x1b[90m[host]\x1b[0m`;
     process.stdout.write(line);
     break;
   }
@@ -265,6 +320,7 @@ Usage:
   bun cli.ts status              Show broker status and all peers
   bun cli.ts peers               List all peers
   bun cli.ts send <target> <msg> Send a message (target: name, ID, or ~/path)
+  bun cli.ts broadcast <msg>     Send a message to every peer (one per session)
   bun cli.ts whoami              Show this session's peer name and ID
   bun cli.ts iam <name>          Rename this session's peer
   bun cli.ts statusline          Statusline command (Claude Code JSON on stdin)
