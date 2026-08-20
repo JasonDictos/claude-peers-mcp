@@ -19,7 +19,7 @@
 
 import type { Peer, Message, SendMessageResponse } from "./shared/types.ts";
 import { brokerFetch, BROKER_PORT, BROKER_URL, IS_REMOTE } from "./shared/client.ts";
-import { claudeKey, getParentPid } from "./shared/runtime.ts";
+import { claudeKey, getParentPid, channelEnabled } from "./shared/runtime.ts";
 import { sessionKey } from "./shared/resolve.ts";
 import { loadConfig, saveConfig, generateToken, CONFIG_PATH } from "./shared/config.ts";
 import { hostMatches, resolveHost, localAddresses } from "./shared/hosts.ts";
@@ -272,6 +272,16 @@ switch (cmd) {
       if (self) {
         console.log(`${self.name} (${self.id})  ${self.host ?? hostname()}:${self.cwd}`);
         if (self.summary) console.log(self.summary);
+        // Registered but not loaded as a channel = inbound messages are
+        // silently dropped by Claude Code. Say so; it looks like a network
+        // fault otherwise.
+        if (self.claude_pid != null && channelEnabled(self.claude_pid) === false) {
+          console.log(
+            `\nWARNING: this session did not load claude-peers as a channel, so messages\n` +
+              `from peers are dropped instead of appearing in the terminal. Relaunch with:\n` +
+              `  claude --dangerously-load-development-channels server:claude-peers`
+          );
+        }
       } else {
         console.log("Not inside a registered Claude Code session.");
       }
@@ -299,9 +309,14 @@ switch (cmd) {
     const branch = getGitBranch(cwd);
 
     let name: string | null = null;
+    let pushOff = false;
     try {
       const peers = await listAllPeers(300);
-      name = findSelf(peers, cwd)?.name ?? null;
+      const self = findSelf(peers, cwd);
+      name = self?.name ?? null;
+      // Registered, but the session never loaded claude-peers as a channel:
+      // inbound messages are dropped silently, so flag it in the status bar
+      pushOff = self?.claude_pid != null && channelEnabled(self.claude_pid) === false;
     } catch {
       // Broker down — no name
     }
@@ -322,6 +337,7 @@ switch (cmd) {
     let line = `\x1b[36m${short}\x1b[0m`;
     if (branch) line += ` \x1b[93m${branch}\x1b[0m`;
     if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
+    if (pushOff) line += ` \x1b[91m[no-push]\x1b[0m`;
     if (model) line += ` \x1b[92m· ${model}\x1b[0m`;
     line += inDocker ? ` \x1b[94m[docker]\x1b[0m` : ` \x1b[38;5;208m[host]\x1b[0m`;
     process.stdout.write(line);

@@ -53,6 +53,31 @@ export function claudeKey(pid: number): string {
   return `${pid}:${getStartTime(pid) ?? "0"}`;
 }
 
+/** Argv of a process, or null if it's gone / unreadable. */
+export function readCmdline(pid: number): string[] | null {
+  try {
+    return readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether a Claude Code process loaded this MCP server as a *channel*.
+ *
+ * Without `server:claude-peers` (or `plugin:…`) in --channels /
+ * --dangerously-load-development-channels, the server still registers and its
+ * tools work, but Claude Code has no listener for pushed events and drops
+ * them silently — inbound peer messages never reach the session. Detecting it
+ * turns that silence into something we can warn about.
+ */
+export function channelEnabled(claudePid: number, serverName = "claude-peers"): boolean | null {
+  const argv = readCmdline(claudePid);
+  if (!argv) return null; // can't tell
+  const entry = new RegExp(`^(server|plugin):${serverName}(@|$)`);
+  return argv.some((a) => entry.test(a));
+}
+
 /**
  * Identifies this PID namespace: hostname + start time of pid 1 (the boot for
  * a host, the container init for a container). Peers with a different runtime

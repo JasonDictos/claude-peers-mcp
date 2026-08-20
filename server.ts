@@ -33,7 +33,7 @@ import {
   getRecentFiles,
 } from "./shared/summarize.ts";
 import { brokerFetch, IS_REMOTE, BROKER_URL } from "./shared/client.ts";
-import { claudeKey, getRuntimeId, getParentPid } from "./shared/runtime.ts";
+import { claudeKey, getRuntimeId, getParentPid, channelEnabled } from "./shared/runtime.ts";
 import { hostname } from "node:os";
 
 // --- Configuration ---
@@ -443,6 +443,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       ];
       if (myGitRoot) parts.push(`Repo: ${myGitRoot}`);
       if (mySummary) parts.push(`Summary: ${mySummary}`);
+      // Without the channel flag, Claude Code silently drops pushed messages:
+      // this session can send but will never be told when peers reply.
+      if (process.ppid && channelEnabled(process.ppid) === false) {
+        parts.push(
+          `Channel push: DISABLED — this session was not started with ` +
+            `"--dangerously-load-development-channels server:claude-peers", so messages from ` +
+            `peers are dropped instead of arriving. Tell the user to relaunch with that flag; ` +
+            `until then, read messages with check_messages or "cli.ts log".`
+        );
+      }
       return {
         content: [{ type: "text" as const, text: parts.join("\n") }],
       };
@@ -607,6 +617,13 @@ async function main() {
   myTty = tty;
   mySummary = initialSummary;
   await register();
+
+  if (process.ppid && channelEnabled(process.ppid) === false) {
+    log(
+      `WARNING: session not started with --dangerously-load-development-channels ` +
+        `server:claude-peers — inbound peer messages will be dropped, not shown`
+    );
+  }
 
   // If summary generation is still running, update it when done
   if (!initialSummary) {
