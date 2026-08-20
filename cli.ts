@@ -77,11 +77,17 @@ function findSelf(peers: Peer[], cwd: string): Peer | null {
 }
 
 function getGitBranch(cwd: string): string | null {
-  const proc = Bun.spawnSync(["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"], {
-    stderr: "ignore",
-  });
-  const branch = new TextDecoder().decode(proc.stdout).trim();
-  return proc.exitCode === 0 && branch ? branch : null;
+  try {
+    const proc = Bun.spawnSync(["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"], {
+      stderr: "ignore",
+    });
+    const branch = new TextDecoder().decode(proc.stdout).trim();
+    return proc.exitCode === 0 && branch ? branch : null;
+  } catch {
+    // git not installed/found in PATH (e.g. a minimal container) -- the
+    // statusline must never crash over this, just omit the branch segment.
+    return null;
+  }
 }
 
 const cmd = process.argv[2];
