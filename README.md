@@ -137,6 +137,7 @@ bun cli.ts broadcast <msg>       # send a message to every peer (one per session
 bun cli.ts whoami                # this session's peer name and ID
 bun cli.ts iam <name>            # rename this session's peer
 bun cli.ts statusline            # statusline command (Claude Code JSON on stdin)
+bun cli.ts log [-n N] [-f]       # message history, full text (-f follows, tail-style)
 bun cli.ts kill-broker           # stop the broker
 ```
 
@@ -208,7 +209,9 @@ PEER_MSG_EOF`
 Confirm who received the broadcast. Subagent peers are skipped — each session gets the message once.
 ```
 
-Then `/peer-whoami`, `/peer-list`, `/peer-iam <name>`, and `/peer-broadcast <message>` work in every session.
+A `/peer-log [count]` command following the same pattern (`cli.ts log -n $ARGUMENTS`) shows recent messages with sender names and full text — useful because the terminal's one-line `← claude-peers: ...` preview truncates. For a live feed, run `cli.ts log -f` as a background task and view it with ctrl-b.
+
+Then `/peer-whoami`, `/peer-list`, `/peer-iam <name>`, `/peer-broadcast <message>`, and `/peer-log` work in every session.
 
 ## Docker containers
 

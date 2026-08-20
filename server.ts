@@ -508,11 +508,15 @@ async function pollAndPushMessages() {
         // Non-critical, proceed without sender info
       }
 
-      // Push as channel notification — this is what makes it immediate
+      // Push as channel notification — this is what makes it immediate.
+      // The sender name is prefixed into the content because the terminal's
+      // one-line preview ("← claude-peers: ...") renders only the content —
+      // meta attributes are invisible there.
+      const senderLabel = fromName || msg.from_name || msg.from_id;
       await mcp.notification({
         method: "notifications/claude/channel",
         params: {
-          content: msg.text,
+          content: `${senderLabel}: ${msg.text}`,
           meta: {
             from_id: msg.from_id,
             from_name: fromName,

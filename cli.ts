@@ -12,10 +12,11 @@
  *   bun cli.ts whoami              — Show this session's peer name and ID
  *   bun cli.ts iam <name>          — Rename this session's peer
  *   bun cli.ts statusline          — Statusline command (reads Claude Code JSON on stdin)
+ *   bun cli.ts log [-n N] [-f]     — Show message history (-f follows, tail-style)
  *   bun cli.ts kill-broker         — Stop the broker daemon
  */
 
-import type { Peer, SendMessageResponse } from "./shared/types.ts";
+import type { Peer, Message, SendMessageResponse } from "./shared/types.ts";
 import { brokerFetch, BROKER_PORT, BROKER_URL } from "./shared/client.ts";
 import { claudeKey, getParentPid } from "./shared/runtime.ts";
 import { sessionKey } from "./shared/resolve.ts";
@@ -309,6 +310,48 @@ switch (cmd) {
     break;
   }
 
+  case "log": {
+    // Full message history, names and text untruncated. -f follows (tail
+    // style): run it as a background task and Claude Code's ctrl-b viewer
+    // shows the live feed; works the same in a tmux window.
+    const follow = process.argv.includes("-f");
+    const nIdx = process.argv.indexOf("-n");
+    const limit = nIdx > -1 ? parseInt(process.argv[nIdx + 1] ?? "50", 10) || 50 : 50;
+    const fmt = (m: Message) =>
+      `${m.sent_at.slice(0, 19).replace("T", " ")}  ${m.from_name || m.from_id} -> ${m.to_name || m.to_id}: ${m.text}`;
+    let lastId = 0;
+    try {
+      const initial = await brokerFetch<{ messages: Message[] }>("/log", { limit });
+      if (initial.messages.length === 0 && !follow) {
+        console.log("No messages logged yet.");
+        break;
+      }
+      for (const m of initial.messages) {
+        console.log(fmt(m));
+        lastId = m.id;
+      }
+    } catch {
+      console.log("Broker is not running.");
+      break;
+    }
+    while (follow) {
+      await new Promise((r) => setTimeout(r, 1000));
+      try {
+        const res = await brokerFetch<{ messages: Message[] }>("/log", {
+          after_id: lastId,
+          limit: 500,
+        });
+        for (const m of res.messages) {
+          console.log(fmt(m));
+          lastId = m.id;
+        }
+      } catch {
+        // Broker briefly down — keep following
+      }
+    }
+    break;
+  }
+
   case "kill-broker": {
     try {
       const health = await brokerFetch<{ status: string; peers: number }>("/health");
@@ -342,5 +385,6 @@ Usage:
   bun cli.ts whoami              Show this session's peer name and ID
   bun cli.ts iam <name>          Rename this session's peer
   bun cli.ts statusline          Statusline command (Claude Code JSON on stdin)
+  bun cli.ts log [-n N] [-f]     Show message history (-f follows, tail-style)
   bun cli.ts kill-broker         Stop the broker daemon`);
 }
