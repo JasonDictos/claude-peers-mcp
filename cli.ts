@@ -175,7 +175,11 @@ switch (cmd) {
         text: msg,
       });
       if (result.ok) {
-        console.log(`Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`);
+        console.log(
+          result.queued_offline
+            ? `No live session for "${target}" — queued for ${result.to?.name} (delivered when it returns)`
+            : `Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`
+        );
       } else {
         console.error(`Failed: ${result.error}`);
         if (result.candidates && result.candidates.length > 0) {

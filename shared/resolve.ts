@@ -78,6 +78,62 @@ function collapseAgentGroups(matches: Peer[]): Peer[] {
   return [...standalone, ...primaries];
 }
 
+/**
+ * A durable mailbox: the (host, cwd) a name is bound to. Sessions come and
+ * go — each registration gets a new peer id — but the mailbox outlives them,
+ * so mail addressed to one waits for that session to return.
+ */
+export interface Mailbox {
+  host: string;
+  cwd: string;
+  name: string;
+}
+
+/**
+ * Resolve a target against known mailboxes rather than live peers, so you can
+ * address a session that is currently offline. Same grammar as live
+ * resolution (name, path, host:path, name@host) minus peer IDs, which are
+ * per-registration and meaningless once a session ends.
+ */
+export function resolveMailbox(
+  boxes: Mailbox[],
+  target: string,
+  home: string
+):
+  | { kind: "match"; box: Mailbox }
+  | { kind: "ambiguous"; candidates: Mailbox[] }
+  | { kind: "none" } {
+  // Reuse the live resolver by presenting mailboxes as peers: same matching
+  // rules, one implementation to keep correct.
+  const asPeers = boxes.map(
+    (b, i) =>
+      ({
+        id: `mailbox:${i}`,
+        name: b.name,
+        pid: 0,
+        claude_pid: null,
+        claude_key: null,
+        runtime: null,
+        host: b.host,
+        cwd: b.cwd,
+        git_root: null,
+        tty: null,
+        summary: "",
+        registered_at: "",
+        last_seen: "",
+      }) as Peer
+  );
+  const r = resolveTarget(asPeers, target, home);
+  if (r.kind === "match") return { kind: "match", box: boxes[asPeers.indexOf(r.peer)]! };
+  if (r.kind === "ambiguous") {
+    return {
+      kind: "ambiguous",
+      candidates: r.candidates.map((p) => boxes[asPeers.indexOf(p)]!),
+    };
+  }
+  return { kind: "none" };
+}
+
 export function resolveTarget(peers: Peer[], target: string, home: string): Resolution {
   // 0. Host-qualified ("archiver:~/tools", "archiver:goofy-joe", "archiver:").
   //    The same directory exists on several machines, so the host prefix is
