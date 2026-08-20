@@ -260,6 +260,8 @@ archiver:                    # that machine's session
 
 Host names match on short name, FQDN, or IP: a peer registered as `archiver.lan` answers to `archiver:`. `bun cli.ts peers archiver` (or `/peer-list archiver`) lists just that machine.
 
+**Dev containers on any machine** need no extra wiring: a container that bind-mounts the host home (the `run_as`/`dev.sh` pattern, running as `dev_<user>`) is found automatically — claude-peers resolves the host home from the symlinked `~/.claude` and reads the config and socket from there. A container registers under its own hostname (`archiverdev`), so address it as `archiverdev:` or, as always, by peer name.
+
 Remote peers are judged alive by heartbeat rather than by PID, since a PID from another machine means nothing locally — and session grouping, re-registration, and sticky names are all scoped per host, so two machines that happen to share a PID or a directory never clobber each other.
 
 ## Configuration
