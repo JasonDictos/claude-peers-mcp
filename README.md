@@ -140,6 +140,14 @@ bun cli.ts statusline            # statusline command (Claude Code JSON on stdin
 bun cli.ts kill-broker           # stop the broker
 ```
 
+`send` and `broadcast` also read the message from **stdin** (pass `-` or no message). Use this for anything with shell metacharacters — an unquoted `&&` or `|` on the command line gets eaten by the shell before the CLI ever sees it:
+
+```bash
+bun cli.ts broadcast - <<'EOF'
+bump een_ports_revision to 7.15 && run `make update-tags`
+EOF
+```
+
 ## Handy slash commands
 
 Drop these in `~/.claude/commands/` to inspect the peer network from any session. Each runs the CLI and reports the result (replace the path with wherever you cloned the repo):
@@ -193,7 +201,9 @@ allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
 ---
 Broadcast result:
 
-!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts broadcast $ARGUMENTS`
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts broadcast - <<'PEER_MSG_EOF'
+$ARGUMENTS
+PEER_MSG_EOF`
 
 Confirm who received the broadcast. Subagent peers are skipped — each session gets the message once.
 ```

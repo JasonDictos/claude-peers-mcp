@@ -72,6 +72,21 @@ function findSelf(peers: Peer[], cwd: string): Peer | null {
   return byCwd.length === 1 ? byCwd[0]! : null;
 }
 
+/**
+ * Message text for send/broadcast: from argv, or from stdin when the args
+ * are empty or "-". Shells eat metachars (&&, |, ;) in unquoted arguments —
+ * piping or heredoc'ing the message avoids the whole quoting problem:
+ *   bun cli.ts send goofy-joe - <<'EOF'
+ *   run make && make install; don't ask
+ *   EOF
+ */
+async function messageFromArgsOrStdin(args: string[]): Promise<string> {
+  const joined = args.join(" ").trim();
+  if (joined && joined !== "-") return joined;
+  const stdin = (await Bun.stdin.text()).trim();
+  return stdin;
+}
+
 function getGitBranch(cwd: string): string | null {
   try {
     const proc = Bun.spawnSync(["git", "-C", cwd, "symbolic-ref", "--short", "HEAD"], {
@@ -129,9 +144,9 @@ switch (cmd) {
 
   case "send": {
     const target = process.argv[3];
-    const msg = process.argv.slice(4).join(" ");
+    const msg = target ? await messageFromArgsOrStdin(process.argv.slice(4)) : "";
     if (!target || !msg) {
-      console.error("Usage: bun cli.ts send <name|id|path> <message>");
+      console.error("Usage: bun cli.ts send <name|id|path> <message>  (or pipe the message on stdin)");
       process.exit(1);
     }
     try {
@@ -187,9 +202,9 @@ switch (cmd) {
   }
 
   case "broadcast": {
-    const msg = process.argv.slice(3).join(" ");
+    const msg = await messageFromArgsOrStdin(process.argv.slice(3));
     if (!msg) {
-      console.error("Usage: bun cli.ts broadcast <message>");
+      console.error("Usage: bun cli.ts broadcast <message>  (or pipe the message on stdin)");
       process.exit(1);
     }
     try {
@@ -251,9 +266,11 @@ switch (cmd) {
     // Reads Claude Code's statusline JSON on stdin. Must be fast and must
     // never fail — degrade to cwd (+ branch) if the broker is unreachable.
     let cwd = process.cwd();
+    let model: string | null = null;
     try {
       const input = JSON.parse(await Bun.stdin.text());
       cwd = input.cwd ?? input.workspace?.current_dir ?? cwd;
+      model = input.model?.display_name ?? null;
     } catch {
       // No/bad stdin — fall back to process cwd
     }
@@ -284,9 +301,10 @@ switch (cmd) {
     }
 
     let line = `\x1b[36m${short}\x1b[0m`;
-    if (branch) line += ` \x1b[93m(${branch})\x1b[0m`;
+    if (branch) line += ` \x1b[93m${branch}\x1b[0m`;
     if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
-    line += inDocker ? ` \x1b[94m[docker]\x1b[0m` : ` \x1b[90m[host]\x1b[0m`;
+    if (model) line += ` \x1b[92m· ${model}\x1b[0m`;
+    line += inDocker ? ` \x1b[94m[docker]\x1b[0m` : ` \x1b[38;5;208m[host]\x1b[0m`;
     process.stdout.write(line);
     break;
   }
