@@ -18,6 +18,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { dirname } from "node:path";
+import { hostname } from "node:os";
 
 /**
  * The real user home when running inside a dev container.
@@ -105,6 +106,48 @@ export function isLoopbackBind(bind: string): boolean {
 export function isLoopbackAddress(addr: string | null | undefined): boolean {
   if (!addr) return false;
   return addr === "127.0.0.1" || addr === "::1" || addr === "::ffff:127.0.0.1";
+}
+
+/**
+ * The machine a session belongs to, which is NOT always its hostname: a dev
+ * container reports its own container hostname (archiverdev), but it runs on
+ * the same machine, in the same bind-mounted directory, as the host session.
+ * Treating those as different machines gave the same work two identities —
+ * different sticky names and separate mailboxes — so a session that moved
+ * into the container lost its name and its queued mail.
+ *
+ * Host sessions drop a marker in the home directory; containers read it
+ * through the same mount they already use to find the config.
+ */
+export const MACHINE_MARKER = ".claude-peers-host";
+
+export function machineName(): string {
+  if (process.env.CLAUDE_PEERS_MACHINE) return process.env.CLAUDE_PEERS_MACHINE;
+  const hh = hostHome();
+  if (hh) {
+    try {
+      const marker = readFileSync(`${hh}/${MACHINE_MARKER}`, "utf8").trim();
+      if (marker) return marker;
+    } catch {
+      // No marker yet — fall back to this runtime's own hostname
+    }
+  }
+  return hostname();
+}
+
+/**
+ * Record this machine's name for containers to find. Only a real host writes
+ * it: a container must never overwrite the marker with its own hostname.
+ */
+export function writeMachineMarker(): void {
+  if (hostHome() !== null) return; // we are inside a container
+  const path = `${process.env.HOME}/${MACHINE_MARKER}`;
+  try {
+    const current = existsSync(path) ? readFileSync(path, "utf8").trim() : "";
+    if (current !== hostname()) writeFileSync(path, hostname() + "\n");
+  } catch {
+    // Unwritable home — machineName() falls back to hostname()
+  }
 }
 
 export function generateToken(): string {
