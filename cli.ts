@@ -21,7 +21,7 @@ import type { Peer, Message, SendMessageResponse } from "./shared/types.ts";
 import { brokerFetch, BROKER_PORT, BROKER_URL, IS_REMOTE } from "./shared/client.ts";
 import { claudeKey, getParentPid, channelEnabled } from "./shared/runtime.ts";
 import { sessionKey } from "./shared/resolve.ts";
-import { loadConfig, saveConfig, generateToken, CONFIG_PATH } from "./shared/config.ts";
+import { loadConfig, saveConfig, generateToken, CONFIG_PATH, machineName } from "./shared/config.ts";
 import { hostMatches, resolveHost, localAddresses } from "./shared/hosts.ts";
 import { hostname, networkInterfaces } from "node:os";
 
@@ -31,8 +31,8 @@ function listAllPeers(timeoutMs = 3000): Promise<Peer[]> {
 
 /** "goofy-joe" locally, "goofy-joe@archiver" for peers on another machine. */
 function peerLabel(p: Peer): string {
-  const host = p.host ?? hostname();
-  return host === hostname() ? p.name : `${p.name}@${host}`;
+  const host = p.host ?? machineName();
+  return host === machineName() ? p.name : `${p.name}@${host}`;
 }
 
 function formatPeer(p: Peer): string {
@@ -71,7 +71,7 @@ function getAncestorPids(maxDepth = 10): number[] {
  */
 function findSelf(peers: Peer[], cwd: string): Peer | null {
   // Only peers on this machine can be us: pid numbers repeat across hosts
-  const here = hostname();
+  const here = machineName();
   peers = peers.filter((p) => (p.host ?? here) === here);
   const ancestors = getAncestorPids();
   for (const pid of ancestors) {
@@ -149,7 +149,7 @@ switch (cmd) {
     try {
       let peers = await listAllPeers();
       if (hostFilter) {
-        peers = peers.filter((p) => hostMatches(p.host ?? hostname(), hostFilter));
+        peers = peers.filter((p) => hostMatches(p.host ?? machineName(), hostFilter));
       }
       if (peers.length === 0) {
         console.log(hostFilter ? `No peers on ${hostFilter}.` : "No peers registered.");
@@ -281,7 +281,7 @@ switch (cmd) {
       const peers = await listAllPeers();
       const self = findSelf(peers, process.cwd());
       if (self) {
-        console.log(`${self.name} (${self.id})  ${self.host ?? hostname()}:${self.cwd}`);
+        console.log(`${self.name} (${self.id})  ${self.host ?? machineName()}:${self.cwd}`);
         if (self.summary) console.log(self.summary);
         // Registered but not loaded as a channel = inbound messages are
         // silently dropped by Claude Code. Say so; it looks like a network

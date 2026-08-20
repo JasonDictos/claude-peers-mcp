@@ -27,14 +27,15 @@ import { generateName, childName } from "./shared/names.ts";
 import { resolveTarget, resolveMailbox, sessionKey, sessionKeyOf } from "./shared/resolve.ts";
 import type { Mailbox } from "./shared/resolve.ts";
 import { getRuntimeId } from "./shared/runtime.ts";
-import { loadConfig, isLoopbackBind, isLoopbackAddress } from "./shared/config.ts";
+import { loadConfig, isLoopbackBind, isLoopbackAddress, machineName, writeMachineMarker } from "./shared/config.ts";
 import { existsSync, unlinkSync, lstatSync } from "node:fs";
 import { hostname } from "node:os";
 
 const PORT = parseInt(process.env.CLAUDE_PEERS_PORT ?? "7899", 10);
 const DB_PATH = process.env.CLAUDE_PEERS_DB ?? `${process.env.HOME}/.claude-peers.db`;
 const SOCKET_PATH = process.env.CLAUDE_PEERS_SOCK ?? `${process.env.HOME}/.claude-peers.sock`;
-const MY_HOST = hostname();
+writeMachineMarker();
+const MY_HOST = machineName();
 
 // This broker's PID namespace. Peers registered from another runtime (e.g. a
 // docker container) can't be liveness-checked via pid — heartbeats rule there.

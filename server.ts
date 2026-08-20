@@ -35,6 +35,7 @@ import {
 import { brokerFetch, IS_REMOTE, BROKER_URL } from "./shared/client.ts";
 import { claudeKey, getRuntimeId, getParentPid, channelEnabled } from "./shared/runtime.ts";
 import { hostname } from "node:os";
+import { machineName, writeMachineMarker } from "./shared/config.ts";
 
 // --- Configuration ---
 
@@ -148,7 +149,7 @@ async function register(): Promise<void> {
     claude_pid: process.ppid || null,
     claude_key: process.ppid ? claudeKey(process.ppid) : null,
     runtime: getRuntimeId(),
-    host: hostname(),
+    host: machineName(),
     push_enabled: !pushDisabled,
     cwd: myCwd,
     git_root: myGitRoot,
@@ -308,7 +309,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
           const parts = [
             `Name: ${p.name}`,
             `ID: ${p.id}`,
-            `Host: ${p.host ?? hostname()}`,
+            `Host: ${p.host ?? machineName()}`,
             `PID: ${p.pid}`,
             `CWD: ${p.cwd}`,
           ];
@@ -452,7 +453,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       const parts = [
         `Name: ${myName ?? "(not assigned yet — broker unreachable)"}`,
         `ID: ${myId}`,
-        `Host: ${hostname()}`,
+        `Host: ${machineName()}`,
         `CWD: ${myCwd}`,
       ];
       if (myGitRoot) parts.push(`Repo: ${myGitRoot}`);
@@ -556,7 +557,7 @@ async function pollAndPushMessages() {
           fromCwd = sender.cwd;
           // Qualify the name when the sender is on another machine, so the
           // preview line says where it came from
-          if (sender.host && sender.host !== hostname()) {
+          if (sender.host && sender.host !== machineName()) {
             fromHost = sender.host;
           }
         }
@@ -642,6 +643,7 @@ async function main() {
   await Promise.race([summaryPromise, new Promise((r) => setTimeout(r, 3000))]);
 
   // 4. Register with broker
+  writeMachineMarker();
   myTty = tty;
   mySummary = initialSummary;
   await register();
