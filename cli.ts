@@ -36,7 +36,10 @@ function peerLabel(p: Peer): string {
 }
 
 function formatPeer(p: Peer): string {
-  const parts = [`${peerLabel(p)}  ${p.id}  PID:${p.pid}  ${p.cwd}`];
+  // Flag sessions that cannot be shown pushed messages, so the roster tells
+  // you who will actually see what you send
+  const flag = p.push_enabled === 0 ? "  [no-push]" : "";
+  const parts = [`${peerLabel(p)}${flag}  ${p.id}  PID:${p.pid}  ${p.cwd}`];
   if (p.summary) parts.push(`  Summary: ${p.summary}`);
   return parts.join("\n");
 }
@@ -178,7 +181,11 @@ switch (cmd) {
         console.log(
           result.queued_offline
             ? `No live session for "${target}" — queued for ${result.to?.name} (delivered when it returns)`
-            : `Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`
+            : result.recipient_no_push
+              ? `Queued for ${result.to?.name} — that session has no channel listener, so it only sees ` +
+                `this via check_messages (relaunch it with --dangerously-load-development-channels ` +
+                `server:claude-peers for live delivery)`
+              : `Message sent to ${result.to ? `${result.to.name} (${result.to.id})` : target}`
         );
       } else {
         console.error(`Failed: ${result.error}`);
@@ -354,6 +361,7 @@ switch (cmd) {
     }
 
     let line = `\x1b[36m${short}\x1b[0m`;
+    line += ` \x1b[90mjason@dictos.com\x1b[0m`;
     if (branch) line += ` \x1b[93m${branch}\x1b[0m`;
     if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
     if (pushOff) {
