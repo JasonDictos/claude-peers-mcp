@@ -14,6 +14,7 @@
  *   bun cli.ts statusline          — Statusline command (reads Claude Code JSON on stdin)
  *   bun cli.ts log [-n N] [-f]     — Show message history (-f follows, tail-style)
  *   bun cli.ts network-setup       — Configure cross-machine peering (--show/--client)
+ *   bun cli.ts update              — Pull latest code, reinstall deps, restart the broker
  *   bun cli.ts kill-broker         — Stop the broker daemon
  */
 
@@ -504,6 +505,62 @@ switch (cmd) {
     break;
   }
 
+  case "update": {
+    // One command per machine: pull, install if deps moved, restart the
+    // broker this machine hosts. Sessions pick up new code when their MCP
+    // server next starts (a /mcp reconnect is enough).
+    const repoDir = new URL("./", import.meta.url).pathname;
+    const git = (...args: string[]) =>
+      Bun.spawnSync(["git", "-C", repoDir, ...args], { stderr: "pipe" });
+    const out = (r: ReturnType<typeof Bun.spawnSync>) =>
+      new TextDecoder().decode(r.stdout).trim();
+
+    const before = out(git("rev-parse", "--short", "HEAD"));
+    const branch = out(git("rev-parse", "--abbrev-ref", "HEAD"));
+    // Pull the current branch from origin explicitly: a checkout without
+    // upstream tracking (a fresh clone of a branch, a detached deploy) should
+    // still update rather than fail on "no tracking information".
+    const pull = git("pull", "--ff-only", "--quiet", "origin", branch);
+    if (pull.exitCode !== 0) {
+      console.error(`git pull failed on ${branch}: ${new TextDecoder().decode(pull.stderr).trim()}`);
+      console.error("(local changes, or the branch has diverged — resolve, then rerun)");
+      process.exit(1);
+    }
+    const after = out(git("rev-parse", "--short", "HEAD"));
+
+    if (before === after) {
+      console.log(`Already up to date (${after}).`);
+    } else {
+      console.log(`Updated ${before} -> ${after}:`);
+      console.log(out(git("log", "--oneline", `${before}..${after}`)));
+      // Dependencies may have moved with the code
+      const deps = out(git("diff", "--name-only", `${before}..${after}`, "--", "package.json", "bun.lock"));
+      if (deps) {
+        console.log("Dependencies changed — running bun install");
+        Bun.spawnSync(["bun", "install"], { cwd: repoDir, stdout: "inherit", stderr: "inherit" });
+      }
+    }
+
+    // The broker is long-lived, so it keeps running old code until restarted.
+    // Only restart the one this machine hosts.
+    if (IS_REMOTE) {
+      console.log(`Broker runs on ${BROKER_URL} — update and restart it there too.`);
+    } else if (before !== after) {
+      const lsof = Bun.spawnSync(["lsof", "-ti", `:${BROKER_PORT}`, "-sTCP:LISTEN"]);
+      const pids = new TextDecoder().decode(lsof.stdout).trim().split("\n").filter(Boolean);
+      for (const pid of pids) process.kill(parseInt(pid), "SIGTERM");
+      Bun.spawn(["setsid", "bun", `${repoDir}broker.ts`], {
+        stdio: ["ignore", "ignore", "ignore"],
+      }).unref();
+      console.log("Broker restarted on the new code.");
+    }
+
+    if (before !== after) {
+      console.log("Sessions keep running the old code until their MCP server restarts — /mcp reconnect, or start a new session.");
+    }
+    break;
+  }
+
   case "kill-broker": {
     try {
       const health = await brokerFetch<{ status: string; peers: number }>("/health");
@@ -539,5 +596,6 @@ Usage:
   bun cli.ts statusline          Statusline command (Claude Code JSON on stdin)
   bun cli.ts log [-n N] [-f]     Show message history (-f follows, tail-style)
   bun cli.ts network-setup       Cross-machine peering (--show, --client <url> --token <t>)
+  bun cli.ts update              Pull latest code, reinstall deps, restart the broker
   bun cli.ts kill-broker         Stop the broker daemon`);
 }
