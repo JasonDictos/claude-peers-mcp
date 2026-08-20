@@ -253,6 +253,22 @@ describe("resolveTarget across machines", () => {
     expect(r).toEqual({ kind: "match", peer: remote });
   });
 
+  test("accepts the displayed name@host form", () => {
+    // This is exactly what list_peers and inbound messages show
+    const r = resolveTarget(both, "arch-tools@archiver", HOME);
+    expect(r).toEqual({ kind: "match", peer: remote });
+  });
+
+  test("name@host tolerates an FQDN registration", () => {
+    const r = resolveTarget(both, "arch-tools@archiver.lan", HOME);
+    expect(r).toEqual({ kind: "match", peer: remote });
+  });
+
+  test("name@wrong-host does not match", () => {
+    const r = resolveTarget(both, "arch-tools@jason-desktop", HOME);
+    expect(r).toEqual({ kind: "none" });
+  });
+
   test("unknown host prefix falls through instead of matching", () => {
     const r = resolveTarget(both, "nosuchbox:~/archiver-tools", HOME);
     expect(r).toEqual({ kind: "none" });

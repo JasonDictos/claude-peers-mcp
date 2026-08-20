@@ -108,6 +108,18 @@ export function resolveTarget(peers: Peer[], target: string, home: string): Reso
   const byName = peers.find((p) => p.name && p.name.toLowerCase() === lower);
   if (byName) return { kind: "match", peer: byName };
 
+  // 2b. The display form, "name@host". Listings and inbound messages show
+  //     peers that way, so it has to be accepted as input too — otherwise you
+  //     copy what you see and get "no peer matches".
+  const at = target.lastIndexOf("@");
+  if (at > 0) {
+    const onHost = peers.filter((p) => hostMatches(p.host, target.slice(at + 1)));
+    if (onHost.length > 0) {
+      const inner = resolveTarget(onHost, target.slice(0, at), home);
+      if (inner.kind !== "none") return inner;
+    }
+  }
+
   // 3. Path
   if (looksLikePath(target)) {
     const path = normalizePath(target, home);
