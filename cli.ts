@@ -22,7 +22,7 @@ import type { Peer, Message, SendMessageResponse } from "./shared/types.ts";
 import { brokerFetch, BROKER_PORT, BROKER_URL, IS_REMOTE } from "./shared/client.ts";
 import { claudeKey, getParentPid, channelEnabled } from "./shared/runtime.ts";
 import { sessionKey } from "./shared/resolve.ts";
-import { loadConfig, saveConfig, generateToken, CONFIG_PATH, machineName } from "./shared/config.ts";
+import { loadConfig, saveConfig, generateToken, CONFIG_PATH, machineName, accountEmail } from "./shared/config.ts";
 import { hostMatches, resolveHost, localAddresses } from "./shared/hosts.ts";
 import { hostname, networkInterfaces } from "node:os";
 
@@ -362,7 +362,8 @@ switch (cmd) {
     }
 
     let line = `\x1b[36m${short}\x1b[0m`;
-    line += ` \x1b[90mjason@dictos.com\x1b[0m`;
+    const email = accountEmail();
+    if (email) line += ` \x1b[90m${email}\x1b[0m`;
     if (branch) line += ` \x1b[93m${branch}\x1b[0m`;
     if (name) line += ` \x1b[95m· ${name}\x1b[0m`;
     if (pushOff) {

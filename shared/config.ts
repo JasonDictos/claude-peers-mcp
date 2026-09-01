@@ -150,6 +150,31 @@ export function writeMachineMarker(): void {
   }
 }
 
+/**
+ * Email of the signed-in Claude account.
+ *
+ * Claude Code does not pass account identity in the statusline payload, so
+ * read it from the config it maintains. Scanned with a regex rather than
+ * JSON.parse: this runs on every statusline render and the file carries the
+ * whole MCP config and history.
+ */
+export function accountEmail(): string | null {
+  const hh = hostHome();
+  const candidates = [
+    `${process.env.HOME}/.claude.json`,
+    ...(hh ? [`${hh}/.claude.json`] : []),
+  ];
+  for (const path of candidates) {
+    try {
+      const m = readFileSync(path, "utf8").match(/"emailAddress"\s*:\s*"([^"]+)"/);
+      if (m?.[1]) return m[1];
+    } catch {
+      // Missing or unreadable — try the next candidate
+    }
+  }
+  return null;
+}
+
 export function generateToken(): string {
   return crypto.randomUUID().replace(/-/g, "");
 }
