@@ -1,7 +1,7 @@
 {
-  "name": "claude-peers",
+  "name": "network-claude-peers-mcp",
   "version": "0.1.0",
-  "description": "Peer discovery and messaging for Claude Code instances",
+  "description": "Networked MCP server that lets Claude Code sessions discover and message each other across directories, machines, and Docker containers",
   "module": "index.ts",
   "type": "module",
   "private": true,

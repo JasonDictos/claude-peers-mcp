@@ -1,310 +1,238 @@
-# claude-peers
+# network-claude-peers-mcp
 
-Let your Claude Code instances find each other and talk. When you're running 5 sessions across different projects, any Claude can discover the others and send messages that arrive instantly.
+**Let your Claude Code sessions talk to each other — across directories, machines, and Docker containers.**
+
+An [MCP](https://modelcontextprotocol.io) server that turns every Claude Code session on your network into an addressable peer. Any session can discover the others, see what they're working on, and send a message that arrives in their terminal *immediately* — no copy-pasting between windows, no shared files, no polling.
 
 ```
-  Terminal 1 (poker-engine)          Terminal 2 (eel)
-  ┌───────────────────────┐          ┌──────────────────────┐
-  │ Claude A              │          │ Claude B             │
-  │ "send a message to    │  ──────> │                      │
-  │  peer xyz: what files │          │ <channel> arrives    │
-  │  are you editing?"    │  <────── │  instantly, Claude B │
-  │                       │          │  responds            │
-  └───────────────────────┘          └──────────────────────┘
+   jason-desktop                          archiver (another machine)
+   ┌──────────────────────┐               ┌──────────────────────┐
+   │ Claude in ~/api      │──────────────>│ Claude in ~/worker   │
+   │ "tell the worker     │   broker      │                      │
+   │  session the schema  │<──────────────│ answers instantly    │
+   │  changed"            │               │  (even inside Docker)│
+   └──────────────────────┘               └──────────────────────┘
 ```
+
+> Ask one session: *"Tell the claude in ~/worker that the schema changed"* — and it does.
+
+**Keywords:** Claude Code · MCP server · multi-agent communication · agent-to-agent messaging · peer discovery · inter-process messaging for AI agents · cross-machine · Docker · Anthropic · Bun · TypeScript
+
+---
+
+## Why
+
+Running five or ten Claude Code sessions at once is normal now — one per repo, some in dev containers, some on a build box. They can't see each other, so *you* become the message bus: copying context between terminals, re-explaining what another session already knows, discovering too late that two sessions edited the same branch.
+
+This gives them a phone book and a mailbox.
+
+## Features
+
+| | |
+|---|---|
+| 🏷 **Human names** | Every session gets a memorable name (`goofy-joe`), globally unique across all machines, so a name alone is a complete address |
+| 📌 **Sticky identity** | Names persist per directory — relaunch a session and it's still `goofy-joe`. Rename it (`iam api-boss`) and that sticks too |
+| 📁 **Address by path** | `~/worker` reaches whoever runs there, matching working directory *or* git repo. Ambiguity returns candidates instead of guessing |
+| 🌐 **Cross-machine** | One broker, many machines. Token-authenticated over your LAN/VPN, with short-name/FQDN/IP resolution and `machine:~/path` addressing |
+| 🐳 **Docker-aware** | Dev containers join automatically — no wiring. A container and its host share one identity, so names and mail follow you in and out |
+| 📬 **Durable messages** | Mail is addressed to a mailbox, not a process. Message a session that's *offline* and it's delivered when it comes back (held 7 days) |
+| ⚡ **Instant delivery** | Messages arrive as [channel](https://code.claude.com/docs/en/channels-reference) notifications mid-task, not on the next poll |
+| 📢 **Broadcast** | One message to every session, exactly once each — subagents collapse into their parent |
+| 📜 **Full message log** | `log -f` tails all peer traffic, untruncated, from any machine |
+| 📊 **Status bar** | Shows the session's peer name, branch, model, and whether it's host or container |
+| 🔎 **Honest failures** | Sends report when a recipient can't receive, when a target is offline, and when a path is ambiguous — no silent drops |
 
 ## Quick start
 
-### 1. Install
+**Requirements:** [Bun](https://bun.sh), Claude Code v2.1.80+, and a claude.ai login (channel push needs it).
 
 ```bash
-git clone https://github.com/louislva/claude-peers-mcp.git ~/claude-peers-mcp   # or wherever you like
-cd ~/claude-peers-mcp
-bun install
+git clone https://github.com/JasonDictos/network-claude-peers-mcp.git ~/claude-peers-mcp
+cd ~/claude-peers-mcp && bun install
+
+# Make it available in every session, from any directory
+claude mcp add --scope user --transport stdio claude-peers -- ~/.bun/bin/bun ~/claude-peers-mcp/server.ts
 ```
 
-### 2. Register the MCP server
-
-This makes claude-peers available in every Claude Code session, from any directory:
+Then start Claude Code with the channel enabled — this is what makes messages *appear*:
 
 ```bash
-claude mcp add --scope user --transport stdio claude-peers -- bun ~/claude-peers-mcp/server.ts
+claude --dangerously-load-development-channels server:claude-peers
 ```
 
-Replace `~/claude-peers-mcp` with wherever you cloned it.
-
-### 3. Run Claude Code with the channel
-
-```bash
-claude --dangerously-skip-permissions --dangerously-load-development-channels server:claude-peers
-```
-
-That's it. The broker daemon starts automatically the first time.
-
-> **Tip:** Add it to an alias so you don't have to type it every time:
->
+> **Put it in an alias.** Without that flag the tools still work, but incoming messages are never displayed — the single most common setup mistake:
 > ```bash
-> alias claudepeers='claude --dangerously-load-development-channels server:claude-peers'
+> alias claude='claude --dangerously-load-development-channels server:claude-peers'
 > ```
 
-### 4. Open a second session and try it
+Open a second session anywhere and try it:
 
-In another terminal, start Claude Code the same way. Then ask either one:
+> *List all peers* → every running session, its directory, and what it's working on
+> *Ask goofy-joe what it's working on* → answers in seconds
+> *Tell the claude in ~/api that the migration landed* → addressed by directory
 
-> List all peers on this machine
-
-It'll show every running instance with their name (like `goofy-joe`), working directory, git repo, and a summary of what they're doing. Then:
-
-> Ask goofy-joe what it's working on
-
-or address a peer by where it's running — no need to look anything up:
-
-> Tell the claude in ~/archiver-tools that the API changed
-
-Paths match a peer's working directory or its git repo (so `~/een-ports` finds a session working in `~/een-ports/src`). If a path matches more than one session, the send fails with the list of candidates so you can pick one by name.
+The broker daemon starts itself the first time. That's the whole setup.
 
 ## What Claude can do
 
-| Tool             | What it does                                                                                |
-| ---------------- | ------------------------------------------------------------------------------------------- |
-| `list_peers`     | Find other Claude Code instances — scoped to `machine`, `directory`, or `repo`              |
-| `send_message`   | Message another instance by name, ID, or directory path (arrives instantly via channel push) |
-| `whoami`         | Get this session's own name, ID, and context                                                |
-| `set_summary`    | Describe what you're working on (visible to other peers)                                    |
-| `check_messages` | Manually check for messages (fallback if not using channel mode)                            |
+| Tool | What it does |
+| --- | --- |
+| `list_peers` | Find other sessions — scoped to `machine`, `directory`, or `repo` |
+| `send_message` | Message a session by name, ID, or directory path (arrives instantly) |
+| `whoami` | This session's own name, ID, machine, and context |
+| `set_summary` | Describe what you're working on, visible to every peer |
+| `check_messages` | Read queued messages explicitly |
 
-## Peer names
+## Addressing
 
-Every session gets a human-readable name at registration — `goofy-joe`, `eager-eddy` — unique among live peers. Names and IDs are interchangeable anywhere a target is accepted.
+Names are globally unique — the broker issues them — so **a name is a complete address**, no matter which machine or container the session is on. Directories repeat across machines, so paths can be qualified:
 
-Don't like the generated name? Rename the session from inside it:
-
-```bash
-bun ~/claude-peers-mcp/cli.ts iam archiver-guy
+```
+goofy-joe                      # by name, from anywhere
+~/worker                       # by directory (or its git repo)
+archiver:~/worker              # that directory on that machine
+archiver:                      # that machine's session
+goofy-joe@archiver             # the form shown in listings
 ```
 
-Names are normalized (lowercase, spaces become dashes) and must be unique among live peers — a collision tells you who already has the name.
+An unqualified path that matches several sessions fails with the candidates listed, rather than silently picking one.
 
-Names are **sticky per directory**: the broker remembers which name belongs to which working directory, so relaunching a session in `~/een-ports` brings back its old name (generated or custom) instead of rolling a new one. If a second session starts in the same directory while the first is running, it gets a fresh name and the binding stays with the original.
+## Multiple machines
 
-### Sessions with subagents
+One machine hosts the broker; the rest connect over TCP.
 
-A session running subagents opens extra MCP connections, each registering as its own peer. These are detected (they share the session's process) and named as suffixed children: the top-level session is `goofy-joe`, its agents `goofy-joe-1`, `goofy-joe-2`, ... Path addressing always resolves to the top-level session — agents are only reachable by their explicit suffixed name. Renaming the session (`iam`) renames its agents with it.
+```bash
+# On the broker host
+bun cli.ts network-setup                # generates a token, opens the bind
+bun cli.ts kill-broker && bun broker.ts &
 
-You can show the name in your Claude Code status bar by pointing `statusLine` in `~/.claude/settings.json` at the bundled command:
+# On every other machine (it prints the exact command, per address)
+bun cli.ts network-setup --client jason-desktop --token <token>
+```
+
+**Auth is mandatory for network binds** — the broker refuses to start on a non-loopback address without a token, because anything that can reach it can inject text into every session on the network. Loopback and unix-socket callers stay trusted. It's plain HTTP with a bearer token: right for a LAN or VPN (Tailscale/WireGuard included), not for the public internet.
+
+Remote peers are tracked by heartbeat rather than PID, and session identity, sticky names, and mailboxes are all scoped per machine — so two machines that happen to share a PID or a directory never collide.
+
+## Dev containers
+
+A container that bind-mounts the host home (the common `run_as`/`dev.sh` pattern) needs **no configuration**: it finds the broker socket and config through the mount, and reports the *machine* it runs on rather than its container hostname. So a session keeps its name and its queued mail when you step into or out of the container, while the status bar still shows `[docker]`.
+
+## Durable messages
+
+Messages are addressed to a **mailbox** — the `(machine, directory, name)` a session lives at — not to the process that happens to be running. Peer IDs change on every restart; mailboxes don't.
+
+- Mail sent to a session that exits before reading it is **kept**, then delivered when that session returns
+- You can message a session that isn't running at all: it's queued rather than refused
+- Renaming a session carries its queued mail along
+- Undelivered mail waits 7 days; delivered history is kept 30 days for the log
+
+## CLI
+
+```bash
+bun cli.ts status                # broker status + all peers
+bun cli.ts peers [machine]       # list peers, optionally one machine
+bun cli.ts send <target> <msg>   # name, ID, or ~/path (also reads stdin)
+bun cli.ts broadcast <msg>       # every session, once each
+bun cli.ts whoami                # this session's identity
+bun cli.ts iam <name>            # rename this session
+bun cli.ts log [-n N] [-f]       # full message history; -f tails it live
+bun cli.ts statusline            # for statusLine in settings.json
+bun cli.ts network-setup         # cross-machine peering
+bun cli.ts update                # pull, reinstall, restart the broker
+bun cli.ts kill-broker           # stop the broker
+```
+
+`send` and `broadcast` also read the message from **stdin** (pass `-`), which keeps shell metacharacters intact:
+
+```bash
+bun cli.ts broadcast - <<'EOF'
+bump the pinned revision to 7.15 && run `make update-tags`
+EOF
+```
+
+### Watching all traffic
+
+A session only displays messages addressed to *it*. To watch everything — including agent-to-agent chatter — tail the log in a spare pane, or have Claude run it as a background task so it's one keystroke away:
+
+```bash
+bun cli.ts log -f
+```
+
+## Slash commands
+
+Drop these in `~/.claude/commands/` for `/peer-list`, `/peer-whoami`, `/peer-iam`, `/peer-broadcast`, and `/peer-log` in every session:
+
+```markdown
+<!-- ~/.claude/commands/peer-list.md -->
+---
+description: List Claude Code peers on the network
+argument-hint: [machine]
+allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
+---
+!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts peers $ARGUMENTS`
+
+Present the peers above as a compact table: name, machine, directory, summary.
+```
+
+The same pattern works for the others — swap `peers` for `whoami`, `iam $ARGUMENTS`, `broadcast - <<'EOF' … EOF`, or `log -n $ARGUMENTS`.
+
+## Status bar
 
 ```json
 "statusLine": { "type": "command", "command": "~/.bun/bin/bun ~/claude-peers-mcp/cli.ts statusline" }
 ```
 
-It prints `~/archiver-tools (main) · goofy-joe` and degrades gracefully (no name shown) when the broker is down.
+Renders `~/api  you@example.com  main · goofy-joe · Opus 5 [host]` — directory, account, branch, peer name, model, and host/container. It degrades gracefully (never blocks, never errors) when the broker is down, and flags `[no-push]` if the session was started without the channel flag and therefore can't receive.
 
 ## How it works
 
-A **broker daemon** runs on `localhost:7899` with a SQLite database. Each Claude Code session spawns an MCP server that registers with the broker and polls for messages every second. Inbound messages are pushed into the session via the [claude/channel](https://code.claude.com/docs/en/channels-reference) protocol, so Claude sees them immediately.
+A **broker daemon** holds the peer registry and message queue in SQLite. Each session spawns an MCP server that registers with it and polls for messages; inbound messages are pushed into the session via the [claude/channel](https://code.claude.com/docs/en/channels-reference) protocol, so Claude reacts mid-task.
 
 ```
-                    ┌───────────────────────────┐
-                    │  broker daemon            │
-                    │  localhost:7899 + SQLite  │
-                    └──────┬───────────────┬────┘
-                           │               │
-                      MCP server A    MCP server B
-                      (stdio)         (stdio)
-                           │               │
-                      Claude A         Claude B
+                 ┌─────────────────────────────┐
+                 │  broker (SQLite)            │
+                 │  unix socket + TCP + token  │
+                 └───┬───────────┬─────────┬───┘
+                     │           │         │
+              MCP server   MCP server   MCP server
+              (stdio)      (stdio)      (stdio, in Docker)
+                     │           │         │
+               Claude A     Claude B    Claude C
+                 local        local     another machine
 ```
 
-The broker auto-launches when the first session starts. It cleans up dead peers automatically. Everything is localhost-only.
-
-## Auto-summary
-
-If you set `OPENAI_API_KEY` in your environment, each instance generates a brief summary on startup using `gpt-5.4-nano` (costs fractions of a cent). The summary describes what you're likely working on based on your directory, git branch, and recent files. Other instances see this when they call `list_peers`.
-
-Without the API key, Claude sets its own summary via the `set_summary` tool.
-
-## CLI
-
-You can also inspect and interact from the command line:
-
-```bash
-cd ~/claude-peers-mcp
-
-bun cli.ts status                # broker status + all peers
-bun cli.ts peers [host]          # list peers (optionally one machine)
-bun cli.ts send <target> <msg>   # send a message (target: name, ID, or ~/path)
-bun cli.ts broadcast <msg>       # send a message to every peer (one per session)
-bun cli.ts whoami                # this session's peer name and ID
-bun cli.ts iam <name>            # rename this session's peer
-bun cli.ts statusline            # statusline command (Claude Code JSON on stdin)
-bun cli.ts log [-n N] [-f]       # message history, full text (-f follows, tail-style)
-bun cli.ts network-setup         # cross-machine peering (--show, --client <host> --token <t>)
-bun cli.ts kill-broker           # stop the broker
-```
-
-`send` and `broadcast` also read the message from **stdin** (pass `-` or no message). Use this for anything with shell metacharacters — an unquoted `&&` or `|` on the command line gets eaten by the shell before the CLI ever sees it:
-
-```bash
-bun cli.ts broadcast - <<'EOF'
-bump een_ports_revision to 7.15 && run `make update-tags`
-EOF
-```
-
-## Handy slash commands
-
-Drop these in `~/.claude/commands/` to inspect the peer network from any session. Each runs the CLI and reports the result (replace the path with wherever you cloned the repo):
-
-```markdown
-<!-- ~/.claude/commands/peer-whoami.md -->
----
-description: Show this session's claude-peers identity (name, ID, cwd)
-allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
----
-Peer identity of this session:
-
-!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts whoami`
-
-Report the identity above to the user in one line.
-```
-
-```markdown
-<!-- ~/.claude/commands/peer-list.md -->
----
-description: List all Claude Code peers on this machine (claude-peers)
-allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
----
-Current peers on the claude-peers network:
-
-!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts peers`
-
-Present the peers above as a compact table: name, ID, directory, summary.
-```
-
-```markdown
-<!-- ~/.claude/commands/peer-iam.md -->
----
-description: Rename this session's claude-peers name
-argument-hint: <name>
-allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
----
-Rename result:
-
-!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts iam $ARGUMENTS`
-
-Confirm the rename to the user in one line (old name -> new name).
-```
-
-```markdown
-<!-- ~/.claude/commands/peer-broadcast.md -->
----
-description: Send a message to all claude-peers sessions on this machine
-argument-hint: <message>
-allowed-tools: Bash(~/.bun/bin/bun ~/claude-peers-mcp/cli.ts:*)
----
-Broadcast result:
-
-!`~/.bun/bin/bun ~/claude-peers-mcp/cli.ts broadcast - <<'PEER_MSG_EOF'
-$ARGUMENTS
-PEER_MSG_EOF`
-
-Confirm who received the broadcast. Subagent peers are skipped — each session gets the message once.
-```
-
-The terminal shows an inbound message as a single truncated line (`← claude-peers: witty-hazel: ...`), which no channel can widen. To read messages in full as they arrive, have Claude run `cli.ts log -f` as a background task — the live feed is then one **ctrl-b** away for the rest of the session.
-
-A `/peer-log [count]` command following the same pattern (`cli.ts log -n $ARGUMENTS`) shows recent messages with sender names and full text — useful because the terminal's one-line `← claude-peers: ...` preview truncates. For a live feed, run `cli.ts log -f` as a background task and view it with ctrl-b.
-
-Then `/peer-whoami`, `/peer-list`, `/peer-iam <name>`, `/peer-broadcast <message>`, and `/peer-log` work in every session.
-
-## Docker containers
-
-Sessions inside a docker container can join the same peer network as the host, provided the host home directory is bind-mounted (e.g. `-v ~/:/home/you`):
-
-- The broker listens on a **unix socket** (`~/.claude-peers.sock`) in addition to TCP. The socket rides the home mount into the container, where the host's TCP loopback is unreachable. Point container sessions at it with `CLAUDE_PEERS_SOCK=/path/to/mounted/home/.claude-peers.sock`.
-- Register the MCP with a bun path that exists in both worlds — `~/.bun/bin/bun` travels with the home mount, `/usr/local/bin/bun` doesn't:
-
-  ```bash
-  claude mcp add --scope user --transport stdio claude-peers -- ~/.bun/bin/bun ~/claude-peers-mcp/server.ts
-  ```
-
-- Liveness and agent grouping are PID-namespace-aware: container peers are judged by heartbeat freshness (a container pid means nothing to the host broker), and session grouping keys include the process start time so pid numbers can't collide across namespaces. A peer wrongly pruned (e.g. after a laptop suspend) re-registers automatically and gets its sticky name back.
-
-## Durable messages
-
-A message is addressed to a **mailbox** — the `(host, cwd, name)` a session lives at — not to the peer registration that happens to be running. Peer IDs change every time a session restarts; mailboxes don't. So:
-
-- Mail sent to a session that exits before reading it is **kept**, not destroyed with the peer, and delivered when that session comes back.
-- You can message a session that is **not running**: `send` resolves against known mailboxes and reports `queued for <name> (delivered when it returns)` instead of failing.
-- Renaming a session retargets its queued mail, so nothing is stranded.
-- Undelivered mail waits 7 days; delivered mail stays 30 days as history for `cli.ts log`.
-
-`cli.ts log` shows queued and delivered messages alike, so nothing is invisible while it waits.
-
-## Multiple machines
-
-Peers on different machines join one network: a single **hub** broker holds the peer list, and other machines' sessions connect to it over TCP.
-
-On the machine that hosts the broker:
-
-```bash
-bun cli.ts network-setup          # generates a token, switches the bind to 0.0.0.0
-bun cli.ts kill-broker && bun broker.ts &   # restart to pick up the new bind
-```
-
-It prints a ready-made command per address it found — hostname first, then routable IPs. Run the one the other machine can reach:
-
-```bash
-bun cli.ts network-setup --client jason-desktop --token <token>   # or --client 10.1.1.4
-```
-
-The client checks that the name resolves and that the broker answers, then writes `~/.claude-peers.json`. Restart Claude Code sessions there and they register on the shared network. `network-setup --show` prints the current role, bind, and token.
-
-**Auth is mandatory for network binds.** The broker refuses to start on a non-loopback address without a token, because anything that can POST to it can inject text into every session on the network. Loopback and unix-socket callers stay trusted, so local and container peers are unaffected. Traffic is plain HTTP with a bearer token — fine for a LAN or VPN (this uses Tailscale/WireGuard addresses happily); don't expose the port to the internet.
-
-**Addressing across machines.** Names are globally unique — the hub issues every one — so a name is a complete address with no host qualifier, and `list_peers` shows `name@host` only as information. Directories *do* repeat across machines, so paths can be qualified:
-
-```
-archiver:~/archiver-tools    # that path on that machine
-archiver:                    # that machine's session
-~/archiver-tools             # ambiguous if both machines have one -> returns candidates
-```
-
-Host names match on short name, FQDN, or IP: a peer registered as `archiver.lan` answers to `archiver:`. `bun cli.ts peers archiver` (or `/peer-list archiver`) lists just that machine.
-
-**Dev containers on any machine** need no extra wiring: a container that bind-mounts the host home (the `run_as`/`dev.sh` pattern, running as `dev_<user>`) is found automatically — claude-peers resolves the host home from the symlinked `~/.claude` and reads the config and socket from there. A container registers under its own hostname (`archiverdev`), so address it as `archiverdev:` or, as always, by peer name.
-
-Remote peers are judged alive by heartbeat rather than by PID, since a PID from another machine means nothing locally — and session grouping, re-registration, and sticky names are all scoped per host, so two machines that happen to share a PID or a directory never clobber each other.
+The broker auto-launches with the first session, prunes dead peers, and exits cleanly. MCP servers shut themselves down when their session dies, so the roster stays honest.
 
 ## Updating
 
-Each machine has its own checkout, so each updates itself:
-
 ```bash
-bun ~/claude-peers-mcp/cli.ts update
+bun cli.ts update      # on each machine
 ```
 
-It pulls the current branch, runs `bun install` only if dependencies moved, and restarts the broker this machine hosts (a long-lived broker otherwise keeps serving old code). If the broker is remote it says so rather than touching it.
+Pulls, reinstalls dependencies only if they moved, and restarts the broker that machine hosts. Sessions pick up new code when their MCP server restarts (`/mcp` reconnect).
 
-Two things worth knowing:
+## Auto-summary (optional)
 
-- **Sessions keep running the old code until their MCP server restarts** — `/mcp` reconnect, or start a new session. The broker and CLI update immediately.
-- The command can only update a checkout that already has it. Bootstrapping an older clone is one `git pull` first.
+With `OPENAI_API_KEY` set, each session generates a one-line summary of what it's working on at startup, visible to peers in `list_peers`. Without it, Claude sets its own via `set_summary`.
 
 ## Configuration
 
-| Environment variable | Default                | Description                                  |
-| -------------------- | ---------------------- | -------------------------------------------- |
-| `CLAUDE_PEERS_PORT`  | `7899`                 | Broker TCP port                              |
-| `CLAUDE_PEERS_SOCK`  | `~/.claude-peers.sock` | Broker unix socket (works across bind mounts) |
-| `CLAUDE_PEERS_BROKER` | —                     | Remote broker URL (this machine is a client)  |
-| `CLAUDE_PEERS_TOKEN` | —                      | Shared secret for network peers               |
-| `CLAUDE_PEERS_BIND`  | `127.0.0.1`            | Broker listen address (non-loopback needs a token) |
-| `CLAUDE_PEERS_CONFIG` | `~/.claude-peers.json` | Where the above three persist (env wins)     |
-| `CLAUDE_PEERS_DB`    | `~/.claude-peers.db`   | SQLite database path                         |
-| `OPENAI_API_KEY`     | —                      | Enables auto-summary via gpt-5.4-nano        |
+| Environment variable | Default | Description |
+| --- | --- | --- |
+| `CLAUDE_PEERS_PORT` | `7899` | Broker TCP port |
+| `CLAUDE_PEERS_SOCK` | `~/.claude-peers.sock` | Unix socket (crosses bind mounts) |
+| `CLAUDE_PEERS_BROKER` | — | Remote broker URL (this machine is a client) |
+| `CLAUDE_PEERS_TOKEN` | — | Shared secret for network peers |
+| `CLAUDE_PEERS_BIND` | `127.0.0.1` | Listen address (non-loopback requires a token) |
+| `CLAUDE_PEERS_CONFIG` | `~/.claude-peers.json` | Where those persist (env wins) |
+| `CLAUDE_PEERS_DB` | `~/.claude-peers.db` | SQLite database |
+| `OPENAI_API_KEY` | — | Enables auto-summary |
 
-## Requirements
+## Credits
 
-- [Bun](https://bun.sh)
-- Claude Code v2.1.80+
-- claude.ai login (channels require it — API key auth won't work)
+A network-capable fork of [louislva/claude-peers-mcp](https://github.com/louislva/claude-peers-mcp), which introduced the idea and the original broker/channel design. This fork adds names and sticky identity, path and host addressing, cross-machine networking with authentication, Docker support, durable mailboxes, broadcast, the message log, the status line, and the update flow.
+
+## License
+
+MIT
