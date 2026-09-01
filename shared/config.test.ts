@@ -2,7 +2,7 @@ import { test, expect, describe, afterEach } from "bun:test";
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir, hostname } from "node:os";
 import { join } from "node:path";
-import { hostHome, firstExisting, machineName, writeMachineMarker, MACHINE_MARKER } from "./config.ts";
+import { hostHome, firstExisting, machineName, writeMachineMarker, MACHINE_MARKER, accountEmail } from "./config.ts";
 
 const originalHome = process.env.HOME;
 const madeDirs: string[] = [];
@@ -146,5 +146,39 @@ describe("writeMachineMarker", () => {
     writeMachineMarker();
     expect(readFileSync(join(host, MACHINE_MARKER), "utf8").trim()).toBe("archiver");
     expect(existsSync(join(container, MACHINE_MARKER))).toBe(false);
+  });
+});
+
+describe("accountEmail", () => {
+  test("reads the signed-in account from Claude's config", () => {
+    const root = scratch();
+    const home = join(root, "jason");
+    mkdirSync(join(home, ".claude"), { recursive: true });
+    writeFileSync(
+      join(home, ".claude.json"),
+      JSON.stringify({ oauthAccount: { emailAddress: "someone@example.com" }, mcpServers: {} })
+    );
+    process.env.HOME = home;
+    expect(accountEmail()).toBe("someone@example.com");
+  });
+
+  test("a container reads it through the mounted host home", () => {
+    const root = scratch();
+    const host = join(root, "jason");
+    const container = join(root, "dev_jason");
+    mkdirSync(join(host, ".claude"), { recursive: true });
+    mkdirSync(container);
+    symlinkSync(join(host, ".claude"), join(container, ".claude"));
+    writeFileSync(join(host, ".claude.json"), '{"oauthAccount":{"emailAddress":"c@example.com"}}');
+    process.env.HOME = container;
+    expect(accountEmail()).toBe("c@example.com");
+  });
+
+  test("null when no config exists, so the segment is simply omitted", () => {
+    const root = scratch();
+    const home = join(root, "jason");
+    mkdirSync(home, { recursive: true });
+    process.env.HOME = home;
+    expect(accountEmail()).toBeNull();
   });
 });
